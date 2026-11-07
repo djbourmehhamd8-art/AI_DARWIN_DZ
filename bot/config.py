@@ -79,6 +79,10 @@ class Config:
     ai_retries: int = 2
     default_persona: str = "default"
     retention_days: int = 30
+    digest_hour: int = -1              # local hour (0-23) for the daily admin report; -1 = off
+    group_daily_limit: int = 0         # default messages per GROUP per day (0 = unlimited); admins can set it per group
+    brave_api_key: str = ""            # optional: reliable web search (free key at brave.com/search/api)
+    searxng_url: str = ""              # optional: your own SearXNG instance, e.g. https://searx.example.org
     web_search: bool = True            # global switch for web-grounded answers
     web_default: str = "auto"          # default per-user mode: off | auto | on
     web_results: int = 5
@@ -86,7 +90,7 @@ class Config:
 
     def all_keys(self) -> list:
         from .keypool import parse_keys
-        return parse_keys(self.api_keys, self.api_key)
+        return parse_keys(self.api_keys, self.api_key) + ([self.brave_api_key] if self.brave_api_key else [])
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -139,6 +143,10 @@ class Config:
             ai_retries=_num(e("AI_RETRIES", ""), cls.ai_retries, int),
             default_persona=e("DEFAULT_PERSONA", cls.default_persona),
             retention_days=_num(e("RETENTION_DAYS", ""), cls.retention_days, int),
+            digest_hour=max(-1, min(_num(e("DIGEST_HOUR", ""), -1, int), 23)),
+            group_daily_limit=max(0, _num(e("GROUP_DAILY_LIMIT", ""), 0, int)),
+            brave_api_key=e("BRAVE_API_KEY", "").strip(),
+            searxng_url=(e("SEARXNG_URL", "").strip().rstrip("/") if e("SEARXNG_URL", "").strip().startswith(("http://", "https://")) else ""),
             web_search=_bool(e("WEB_SEARCH", ""), True),
             web_default=(e("WEB_DEFAULT", "auto").strip().lower() if e("WEB_DEFAULT", "auto").strip().lower() in ("off", "auto", "on") else "auto"),
             web_results=max(1, min(_num(e("WEB_RESULTS", ""), cls.web_results, int), 10)),

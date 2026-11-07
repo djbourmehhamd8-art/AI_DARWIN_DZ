@@ -42,40 +42,44 @@ class Preflight(unittest.TestCase):
     def unreachable(addr, timeout):
         raise OSError(111, "Connection refused")
 
+    @staticmethod
+    def probe_ok(cfg):
+        return [{"title": "T", "url": "https://t.com", "snippet": "s"}], "duckduckgo", ["duckduckgo: ok (1)"]
+
     def status(self, results, label):
         return next(s for s, l, _ in results if l.startswith(label))
 
     def test_ready_when_everything_works(self):
-        res = run_preflight(self.cfg, FakeTG({"username": "bot", "can_read_all_group_messages": True}), self.reachable)
+        res = run_preflight(self.cfg, FakeTG({"username": "bot", "can_read_all_group_messages": True}), self.reachable, self.probe_ok)
         self.assertFalse([r for r in res if r[0] == "fail"], res)
         self.assertIn("READY", render(res))
         self.assertTrue(Path(self.cfg.db_path).exists())
 
     def test_bad_token_and_no_network_fail(self):
-        res = run_preflight(self.cfg, FakeTG(None), self.unreachable)
+        res = run_preflight(self.cfg, FakeTG(None), self.unreachable, self.probe_ok)
         self.assertEqual(self.status(res, "Telegram token"), "fail")
         self.assertEqual(self.status(res, "Network → api.telegram.org"), "fail")
         self.assertIn("NOT READY", render(res))
 
     def test_privacy_mode_and_missing_admin_are_warnings(self):
         cfg = dataclasses.replace(self.cfg, admin_ids=frozenset())
-        res = run_preflight(cfg, FakeTG({"username": "bot", "can_read_all_group_messages": False}), self.reachable)
+        res = run_preflight(cfg, FakeTG({"username": "bot", "can_read_all_group_messages": False}), self.reachable, self.probe_ok)
         self.assertEqual(self.status(res, "Telegram token"), "warn")
         self.assertEqual(self.status(res, "ADMIN_IDS"), "warn")
         self.assertIn("Privacy Mode", str([r for r in res if r[1] == "Telegram token"]))
         self.assertNotIn("NOT READY", render(res))
 
-    def test_web_search_unreachable_is_only_a_warning(self):
-        calls = []
-
-        def connect(addr, timeout):
-            calls.append(addr[0])
-            if "duckduckgo" in addr[0]:
-                raise OSError("no route")
-            return self.reachable(addr, timeout)
-        res = run_preflight(self.cfg, FakeTG({"username": "b"}), connect)
-        self.assertEqual(self.status(res, "Network → web search"), "warn")
+    def test_web_search_failure_is_only_a_warning_with_advice(self):
+        res = run_preflight(self.cfg, FakeTG({"username": "b"}), self.reachable,
+                            lambda cfg: ([], "", ["duckduckgo: HTTP 202", "wikipedia: ConnectionError"]))
+        self.assertEqual(self.status(res, "Web search"), "warn")
+        self.assertIn("BRAVE_API_KEY", str([r for r in res if r[1] == "Web search"]))
         self.assertFalse([r for r in res if r[0] == "fail"])
+
+    def test_wikipedia_only_is_a_warning_with_advice(self):
+        res = run_preflight(self.cfg, FakeTG({"username": "b"}), self.reachable,
+                            lambda cfg: ([{"title": "x", "url": "https://x", "snippet": ""}], "wikipedia", []))
+        self.assertEqual(self.status(res, "Web search"), "warn")
 
     def test_unwritable_data_folder_fails(self):
         if os.geteuid() == 0:
@@ -83,7 +87,7 @@ class Preflight(unittest.TestCase):
         ro = os.path.join(self.tmp, "ro")
         os.mkdir(ro, 0o500)
         cfg = dataclasses.replace(self.cfg, db_path=os.path.join(ro, "sub", "bot.db"))
-        self.assertEqual(self.status(run_preflight(cfg, None, self.reachable), "Data folder"), "fail")
+        self.assertEqual(self.status(run_preflight(cfg, None, self.reachable, self.probe_ok), "Data folder"), "fail")
 
 
 class Permissions(unittest.TestCase):

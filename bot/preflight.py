@@ -17,7 +17,12 @@ def _connect(host: str, port: int, timeout: float = 6.0, connect=socket.create_c
     connect((host, port), timeout).close()
 
 
-def run_preflight(cfg, tg=None, connect=socket.create_connection) -> list:
+def _default_web_probe(cfg):
+    from . import websearch
+    return websearch.search_web("how many countries are in the world", 2, brave_key=cfg.brave_api_key, searxng_url=cfg.searxng_url)
+
+
+def run_preflight(cfg, tg=None, connect=socket.create_connection, web_probe=None) -> list:
     out = []
 
     def add(status, label, detail=""):
@@ -81,10 +86,15 @@ def run_preflight(cfg, tg=None, connect=socket.create_connection) -> list:
 
     if cfg.web_search:
         try:
-            _connect("html.duckduckgo.com", 443, connect=connect)
-            add("ok", "Network → web search", "html.duckduckgo.com reachable")
-        except OSError:
-            add("warn", "Network → web search", "unreachable: answers will simply skip web results")
+            res, provider, diag = (web_probe or _default_web_probe)(cfg)
+        except Exception as e:                                       # noqa: BLE001
+            res, provider, diag = [], "", [type(e).__name__]
+        if res:
+            add("ok" if provider in ("brave", "searxng", "duckduckgo", "duckduckgo-lite") else "warn", "Web search",
+                f"works via {provider}" + ("" if provider != "wikipedia" else
+                                           " (fallback only: DuckDuckGo is blocking this server; add BRAVE_API_KEY for reliable results)"))
+        else:
+            add("warn", "Web search", "no provider answered (" + "; ".join(diag)[:160] + "). Answers will skip web results. Add BRAVE_API_KEY (free) or SEARXNG_URL.")
     return out
 
 

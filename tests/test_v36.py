@@ -108,6 +108,8 @@ class GroupLeakFix(Harness):
     def test_admin_commands_refused_in_groups(self):
         import dataclasses
         self.app.cfg = dataclasses.replace(self.app.cfg, groups=True)
+        self.app.db.upsert_chat(-100, "G")
+        self.app.db.set_chat_allowed(-100, True)           # activated, so the request reaches the admin-command guard
         msg = {"message_id": 9, "chat": {"id": -100, "type": "supergroup"},
                "from": {"id": 1, "first_name": "A"}, "text": "/backup"}
         self.app.on_message(msg)

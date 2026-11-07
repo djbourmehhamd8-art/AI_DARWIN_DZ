@@ -152,6 +152,8 @@ class IntegrationTest(unittest.TestCase):
         self.addCleanup(db.close)
         self.addCleanup(app.ai.session.close)
         self.addCleanup(app.tg.session.close)
+        db.upsert_chat(-500, "Test group")
+        db.set_chat_allowed(-500, True)                          # groups only answer once an admin activated them
         group_msg = {"update_id": 20, "message": {
             "message_id": 20, "chat": {"id": -500, "type": "group"},
             "from": {"id": 1, "first_name": "Tester"}, "text": "@testbot ping"}}

@@ -9,6 +9,7 @@ import ipaddress
 import logging
 import re
 import socket
+import time
 import urllib.parse
 
 import requests
@@ -68,20 +69,138 @@ def parse_results(page: str, n: int = 5) -> list:
     return out
 
 
-def search(query: str, n: int = 5, timeout: float = 10, post=None) -> list:
-    """Return [{title, url, snippet}] — empty list on any failure (the answer then continues without web data)."""
+BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+WIKI_UA = "DarwinBot/4.1 (Telegram security assistant; https://github.com) python-requests"
+CACHE_TTL = 600
+BREAKER_SECONDS = 300                       # a provider that blocked us is skipped for 5 minutes (keeps answers fast)
+LAST = {"provider": "", "diag": [], "ts": 0.0}          # what happened on the most recent search (shown in the admin panel)
+_cache: dict = {}
+_breaker: dict = {}
+_ARABIC = re.compile(r"[\u0600-\u06FF]")
+
+
+def parse_lite(page: str, n: int = 5) -> list:
+    """DuckDuckGo Lite: <a href=... class='result-link'>title</a> ... <td class='result-snippet'>text</td>."""
+    links = re.findall(r"<a[^>]*?href=[\"']([^\"']+)[\"'][^>]*?class=[\"']result-link[\"'][^>]*>(.*?)</a>", page, re.S)
+    links += re.findall(r"<a[^>]*?class=[\"']result-link[\"'][^>]*?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", page, re.S)
+    snippets = [_clean(x) for x in re.findall(r"class=[\"']result-snippet[\"'][^>]*>(.*?)</td>", page, re.S)]
+    out, seen = [], set()
+    for i, (href, title) in enumerate(links):
+        url = _real_url(href)
+        if not url.startswith(("http://", "https://")) or "duckduckgo.com/y.js" in url or url in seen:
+            continue
+        seen.add(url)
+        out.append({"title": _clean(title)[:160], "url": url, "snippet": (snippets[i] if i < len(snippets) else "")[:400]})
+        if len(out) >= n:
+            break
+    return out
+
+
+def _blocked(r, page: str) -> bool:
+    return r.status_code in (202, 403, 429) or "anomaly" in page[:20000].lower() or "captcha" in page[:20000].lower()
+
+
+def _ddg(url: str, query: str, parser, n: int, timeout: float, http) -> list:
+    r = http.post(url, data={"q": query}, timeout=timeout, headers={
+        "User-Agent": BROWSER_UA, "Accept": "text/html,application/xhtml+xml", "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+        "Referer": url, "Origin": url.rsplit("/", 2)[0]})
+    if r.status_code != 200 or _blocked(r, r.text):
+        raise _Blocked(f"HTTP {r.status_code}" + (" (anti-bot page)" if r.status_code == 200 else ""))
+    res = parser(r.text, n)
+    if not res:
+        raise _Blocked("page had no results")
+    return res
+
+
+class _Blocked(Exception):
+    pass
+
+
+def _brave(query: str, n: int, timeout: float, http, key: str) -> list:
+    r = http.get("https://api.search.brave.com/res/v1/web/search", params={"q": query, "count": n}, timeout=timeout,
+                 headers={"Accept": "application/json", "X-Subscription-Token": key, "User-Agent": WIKI_UA})
+    if r.status_code != 200:
+        raise _Blocked(f"HTTP {r.status_code}")
+    return [{"title": _clean(x.get("title", ""))[:160], "url": x.get("url", ""), "snippet": _clean(x.get("description", ""))[:400]}
+            for x in (r.json().get("web") or {}).get("results", []) if str(x.get("url", "")).startswith(("http://", "https://"))][:n]
+
+
+def _searxng(query: str, n: int, timeout: float, http, base: str) -> list:
+    r = http.get(base.rstrip("/") + "/search", params={"q": query, "format": "json", "safesearch": 0}, timeout=timeout,
+                 headers={"User-Agent": BROWSER_UA, "Accept": "application/json"})
+    if r.status_code != 200:
+        raise _Blocked(f"HTTP {r.status_code}")
+    return [{"title": _clean(x.get("title", ""))[:160], "url": x.get("url", ""), "snippet": _clean(x.get("content", ""))[:400]}
+            for x in r.json().get("results", []) if str(x.get("url", "")).startswith(("http://", "https://"))][:n]
+
+
+def _wikipedia(query: str, n: int, timeout: float, http) -> list:
+    """Always reachable and great for factual questions (how many countries, who is…, what is…)."""
+    lang = "ar" if _ARABIC.search(query) else "en"
+    r = http.get(f"https://{lang}.wikipedia.org/w/api.php", timeout=timeout, headers={"User-Agent": WIKI_UA}, params={
+        "action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": min(n, 5), "prop": "extracts",
+        "exintro": 1, "explaintext": 1, "exlimit": min(n, 5), "exchars": 600, "format": "json", "utf8": 1})
+    if r.status_code != 200:
+        raise _Blocked(f"HTTP {r.status_code}")
+    pages = sorted(((r.json().get("query") or {}).get("pages") or {}).values(), key=lambda p: p.get("index", 99))
+    return [{"title": f"{p.get('title', '')} — Wikipedia ({lang})"[:160],
+             "url": f"https://{lang}.wikipedia.org/wiki/" + urllib.parse.quote(str(p.get("title", "")).replace(" ", "_")),
+             "snippet": _clean(p.get("extract", ""))[:500]} for p in pages if p.get("title")][:n]
+
+
+def search_web(query: str, n: int = 5, timeout: float = 7, brave_key: str = "", searxng_url: str = "", http=None,
+               stop_on_first: bool = True, now=None) -> tuple:
+    """Try providers in order until one answers. Returns (results, provider, diag) where diag lists what failed and why.
+    Order: Brave API (if key) -> your SearXNG (if url) -> DuckDuckGo HTML -> DuckDuckGo Lite -> Wikipedia."""
     q = " ".join((query or "").split())[:300]
     if not q:
-        return []
-    try:
-        r = (post or requests.post)("https://html.duckduckgo.com/html/", data={"q": q}, headers={"User-Agent": UA},
-                                    timeout=timeout)
-        if r.status_code != 200:
-            return []
-        return parse_results(r.text, n)
-    except Exception as e:                                           # noqa: BLE001 - never break the answer
-        log.warning("web search failed: %s", type(e).__name__)
-        return []
+        return [], "", []
+    clock = now or time.time
+    http = http or requests
+    hit = _cache.get(q.lower())
+    if stop_on_first and hit and clock() - hit[0] < CACHE_TTL:
+        return hit[1], hit[2] + " (cached)", []
+    providers = []
+    if brave_key:
+        providers.append(("brave", lambda: _brave(q, n, timeout, http, brave_key)))
+    if searxng_url:
+        providers.append(("searxng", lambda: _searxng(q, n, timeout, http, searxng_url)))
+    providers += [("duckduckgo", lambda: _ddg("https://html.duckduckgo.com/html/", q, parse_results, n, timeout, http)),
+                  ("duckduckgo-lite", lambda: _ddg("https://lite.duckduckgo.com/lite/", q, parse_lite, n, timeout, http)),
+                  ("wikipedia", lambda: _wikipedia(q, n, timeout, http))]
+    diag, found, used = [], [], ""
+    for name, fn in providers:
+        if stop_on_first and _breaker.get(name, 0) > clock():
+            diag.append(f"{name}: skipped (blocked recently)")
+            continue
+        try:
+            res = fn()
+            if not res:
+                raise _Blocked("no results")
+            diag.append(f"{name}: ok ({len(res)})")
+            if not found:
+                found, used = res, name
+            if stop_on_first:
+                break
+        except Exception as e:                                       # noqa: BLE001 - one provider failing must never break the answer
+            reason = str(e) if isinstance(e, _Blocked) else type(e).__name__
+            diag.append(f"{name}: {reason}")
+            if name != "wikipedia":
+                _breaker[name] = clock() + BREAKER_SECONDS
+    if found and stop_on_first:
+        if len(_cache) > 200:
+            _cache.clear()
+        _cache[q.lower()] = (clock(), found, used)
+    return found, used, diag
+
+
+def search(query: str, n: int = 5, timeout: float = 7, post=None, brave_key: str = "", searxng_url: str = "") -> list:
+    """Compatibility wrapper: results only (empty list when every provider failed). Records LAST for diagnostics."""
+    res, provider, diag = search_web(query, n, timeout, brave_key=brave_key, searxng_url=searxng_url)
+    LAST.update({"provider": provider, "diag": diag, "ts": time.time()})
+    if not res:
+        log.warning("web search failed on every provider: %s", "; ".join(diag))
+    return res
 
 
 # ---------------------------------------------------------------------------------------- safe fetch

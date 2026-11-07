@@ -45,6 +45,8 @@ TEMPS = [0.2, 0.5, 0.7, 1.0, 1.3]
 
 COMMANDS_AR = [("menu", "القائمة الرئيسية"), ("case", "القضايا (مساحات عمل)"), ("notes", "مكتبتي (ملاحظات)"),
                ("search", "بحث في الويب"), ("files", "تصدير ملفات / ZIP"), ("new", "محادثة جديدة"), ("stop", "إيقاف الرد"), ("help", "المساعدة")]
+COMMANDS_GROUP_AR = [("help", "المساعدة"), ("search", "بحث في الويب"), ("id", "معرّفك")]
+COMMANDS_GROUP_EN = [("help", "Help"), ("search", "Web search"), ("id", "Your ID")]
 COMMANDS_EN = [("menu", "Main menu"), ("case", "Cases (workspaces)"), ("notes", "My library (notes)"),
                ("search", "Web search"), ("files", "Export files / ZIP"), ("new", "New conversation"), ("stop", "Stop reply"), ("help", "Help")]
 # Older slash commands (/url, /ioc, /remind ...) still work as hidden shortcuts; they are just not advertised.
@@ -79,7 +81,8 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         self.started = time.time()
         self._init_access()
         self._denied_shown = {}
-        self.maintenance = False                       # admin switch: only admins are served while True
+        self.maintenance = db.get_setting("maintenance") == "1"  # admin switch (persisted): only admins are served while True
+        self._last_poll_log = 0.0
         self._key_notified = {}                        # masked key -> last admin notification time
         ai.pool.on_event = self._key_event
         self._eph = []                                 # (due, chat_id, message_id) auto-delete queue
@@ -110,7 +113,7 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
             "ban": self.adm_ban, "unban": self.adm_unban, "allow": self.adm_allow,
             "disallow": self.adm_disallow, "backup": self.adm_backup, "audit": self.adm_audit,
             "status": self.adm_status, "keys": self.adm_keys, "diag": self.adm_diag,
-            "find": self.adm_find, "dm": self.adm_dm_send, "dmq": self.adm_dm_pending,
+            "find": self.adm_find, "report": self.adm_report, "websearch": self.adm_websearch, "dm": self.adm_dm_send, "dmq": self.adm_dm_pending,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -129,6 +132,13 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         self.tg.delete_webhook()
         self.tg.set_my_commands([{"command": c, "description": d} for c, d in COMMANDS_AR])
         self.tg.set_my_commands([{"command": c, "description": d} for c, d in COMMANDS_EN], "en")
+        self.tg.set_my_commands([{"command": c, "description": d} for c, d in COMMANDS_GROUP_AR], "ar", {"type": "all_group_chats"})
+        self.tg.set_my_commands([{"command": c, "description": d} for c, d in COMMANDS_GROUP_EN], None, {"type": "all_group_chats"})
+        for aid in self.cfg.admin_ids:               # admins also see /panel in their private chat
+            extra = COMMANDS_AR if self._lang_of(aid) == "ar" else COMMANDS_EN
+            self.tg.set_my_commands([{"command": c, "description": d} for c, d in
+                                     [("panel", "لوحة الإدارة" if self._lang_of(aid) == "ar" else "Admin panel")] + list(extra)],
+                                    None, {"type": "chat", "chat_id": aid})
         if not (self.cfg.public or self.cfg.admin_ids or self.cfg.allowed_ids):
             log.warning("Nobody can use the bot: set ADMIN_IDS, ALLOWED_IDS or PUBLIC=true "
                         "(send /id to the bot to learn your ID)")
@@ -139,6 +149,7 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         while not self.stop.is_set():
             updates = self.tg.get_updates(offset)
             if updates is None:
+                self._poll_failed()
                 self.stop.wait(backoff)
                 backoff = min(backoff * 2, 30)
                 continue
@@ -148,6 +159,25 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
                 self.pool.submit(self._safe, upd)
         log.info("Shutting down…")
         self.pool.shutdown(wait=True, cancel_futures=False)
+
+    def _poll_failed(self) -> None:
+        """Say WHY polling fails instead of retrying silently. 401 is fatal; 409 means a second copy is running."""
+        err = self.tg.poll_error
+        if not err:
+            return
+        code, desc = err
+        if code == 401:
+            raise RuntimeError("Telegram rejected the bot token (401 Unauthorized): check TELEGRAM_TOKEN in .env "
+                               "(it may have been revoked in @BotFather)")
+        now = time.monotonic()
+        if now - self._last_poll_log < 30:
+            return
+        self._last_poll_log = now
+        if code == 409:
+            log.error("Telegram 409 Conflict: another process is polling with this same bot token (Termux, an old "
+                      "server, a second copy). Stop the other copy: only ONE instance may run per token.")
+        else:
+            log.warning("getUpdates failed: %s %s", code, desc)
 
     def _safe(self, upd) -> None:
         try:
@@ -215,6 +245,8 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
                 self.group_admin_command(chat_id, msg, uid, head)
                 return
             member_ok = self.group_member_ok(chat_id, msg, user)
+            if not member_ok:                                   # unauthorised group (or banned sender): serve nobody
+                return
 
         if text.startswith("/"):
             head, _, args = text.partition(" ")
@@ -376,9 +408,28 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         return f"{instr}\n\n--- {doc.get('file_name', 'file')} ---\n{body}"
 
     # ------------------------------------------------------------------ AI
+    def default_user_limit(self) -> int:
+        v = self.db.get_setting("limit_user", "")
+        return int(v) if v.lstrip("-").isdigit() else self.cfg.daily_limit
+
+    def default_group_limit(self) -> int:
+        v = self.db.get_setting("limit_group", "")
+        return int(v) if v.lstrip("-").isdigit() else self.cfg.group_daily_limit
+
+    def group_limit(self, chat_id: int) -> int:
+        row = self.db.get_chat(chat_id)
+        own = row["daily_limit"] if row else -1
+        return own if own >= 0 else self.default_group_limit()
+
     def _quota_ok(self, chat_id, user) -> bool:
+        if chat_id < 0 and not self.is_admin(user["id"]):
+            glim = self.group_limit(chat_id)                                      # messages per day for the whole group
+            if glim and self.db.daily_count(chat_id) >= glim:
+                self.tg.send_message(chat_id, tr_(user["lang"], f"🚫 بلغت هذه المجموعة حدّها اليومي ({glim} رسالة). يتجدد غداً.",
+                                                  f"🚫 This group reached its daily limit ({glim} messages). It resets tomorrow."))
+                return False
         ov = user.get("limit_override", -1)
-        lim = ov if (ov is not None and ov >= 0) else self.cfg.daily_limit        # per-user override set by an admin
+        lim = ov if (ov is not None and ov >= 0) else self.default_user_limit()    # per-user override set by an admin
         if chat_id < 0 and not self.allowed(user) and self.cfg.group_member_limit:
             lim = self.cfg.group_member_limit                                     # members of an authorised group
         if lim and not self.is_admin(user["id"]) and self.db.daily_count(user["id"]) >= lim:
@@ -432,9 +483,11 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
             return t(lang, f"err_{e.status if e.status != 403 else 401}")
         return t(lang, "err_generic", e=(e.message or "")[:200])
 
-    def _record_usage(self, uid, usage) -> None:
+    def _record_usage(self, uid, usage, chat_id=None) -> None:
         self.db.add_usage(uid, int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)))
         self.db.bump_daily(uid)
+        if chat_id is not None and chat_id < 0:
+            self.db.bump_daily(chat_id)                                        # the group's own daily counter
 
     def _generate(self, chat_id, user, messages, temperature):
         """Stream one model reply into the chat. Returns the (possibly partial) text, or None when nothing usable."""
@@ -462,7 +515,7 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
                 renderer.fail("⏹", self.retry_kb(lang))
                 return None
             renderer.finish(text + " ⏹")
-            self._record_usage(user["id"], {
+            self._record_usage(user["id"], chat_id=chat_id, usage={
                 "prompt_tokens": sum(len(m["content"]) for m in messages) // 3,
                 "completion_tokens": est_tokens(text)})
             return text
@@ -477,7 +530,7 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         finally:
             self.cancels.pop(chat_id, None)
         renderer.finish(text)
-        self._record_usage(user["id"], usage)
+        self._record_usage(user["id"], usage, chat_id=chat_id)
         return text
 
     def _answer(self, chat_id, user) -> None:
@@ -716,7 +769,8 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         self.show_detail(chat_id, user)
 
     def cmd_quota(self, chat_id, user, args):
-        used, lim = self.db.daily_count(user["id"]), self.cfg.daily_limit
+        ov = user.get("limit_override", -1)
+        used, lim = self.db.daily_count(user["id"]), (ov if (ov is not None and ov >= 0) else self.default_user_limit())
         key = "quota_info" if lim and not self.is_admin(user["id"]) else "quota_unlimited"
         self.tg.send_message(chat_id, t(user["lang"], key, used=used, limit=lim))
 
@@ -749,6 +803,12 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
                 if now - last_purge > 3600:
                     last_purge = now
                     self._purge()
+                if self.cfg.digest_hour >= 0:
+                    lt = time.localtime()
+                    day = time.strftime("%Y-%m-%d", lt)
+                    if lt.tm_hour >= self.cfg.digest_hour and self.db.get_setting("digest_day") != day:
+                        self.db.set_setting("digest_day", day)      # first, so a crash never causes a duplicate flood
+                        self.send_daily_report()
             except Exception:
                 log.exception("scheduler failed")
 

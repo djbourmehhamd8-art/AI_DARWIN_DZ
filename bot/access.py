@@ -263,13 +263,12 @@ class AccessMixin:
             self.db.delete_chat(chat["id"])
 
     def group_member_ok(self, chat_id: int, msg: dict, user: dict) -> bool:
-        """True when this group message should be served: the group is authorised, or the sender has personal access."""
+        """True only when the GROUP is authorised (or GROUP_OPEN). Personal access never opens an unauthorised group:
+        not for approved users, not for admins (admins use /allowgroup or the panel to activate it)."""
         row = self.db.upsert_chat(chat_id, (msg.get("chat") or {}).get("title") or "")
         if user.get("banned") and not self.is_admin(user["id"]):
             return False
         if row["allowed"] or self.cfg.group_open:
-            return True
-        if self.allowed(user):
             return True
         now = time.time()
         if now - self._group_notice.get(chat_id, 0) >= GROUP_NOTICE_EVERY:

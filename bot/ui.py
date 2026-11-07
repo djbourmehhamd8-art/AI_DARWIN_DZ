@@ -189,8 +189,9 @@ class UIMixin:
             [("📣 " + tr(lang, "بث رسالة", "Broadcast"), "t:bc_text"), ("📈 " + tr(lang, "إحصائيات", "Stats"), "adm:stats")],
             [("🩺 " + tr(lang, "النظام", "System"), "adm:sys"), ("🧾 " + tr(lang, "سجل التدقيق", "Audit log"), "adm:audit")],
             [("🔑 " + tr(lang, "مفاتيح API", "API keys"), "adm:keys"), ("💾 " + tr(lang, "نسخة احتياطية", "Backup"), "adm:backup")],
-            [("📤 " + tr(lang, "تصدير CSV", "Export CSV"), "adm:csv"),
-             (("🛠 " + tr(lang, "الصيانة: تعمل", "Maintenance: ON")) if self.maintenance else ("🛠 " + tr(lang, "وضع الصيانة", "Maintenance")),
+            [("📊 " + tr(lang, "الحدود اليومية", "Daily limits"), "adm:lm"), ("📈 " + tr(lang, "تقرير اليوم", "Today's report"), "adm:rep")],
+            [("🔎 " + tr(lang, "اختبار البحث", "Test web search"), "adm:wt"), ("📤 " + tr(lang, "تصدير CSV", "Export CSV"), "adm:csv")],
+            [(("🛠 " + tr(lang, "الصيانة: تعمل", "Maintenance: ON")) if self.maintenance else ("🛠 " + tr(lang, "وضع الصيانة", "Maintenance")),
               "adm:mnt", "danger" if self.maintenance else None)],
             [("🔄 " + tr(lang, "تحديث", "Refresh"), "m:adm")] + self.home_row(lang),
         ])
@@ -349,6 +350,9 @@ class UIMixin:
         if data.startswith("req:"):                              # usable by people who do not have access yet
             self.tg.answer_callback(cb["id"])
             self.access_callback(data, chat_id, user, msg.get("message_id"))
+            return
+        if chat_id < 0 and not self.group_authorised(chat_id):
+            self.tg.answer_callback(cb["id"], "🔒")
             return
         if not self.allowed(user):
             self.tg.answer_callback(cb["id"], "⛔")

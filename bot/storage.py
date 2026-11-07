@@ -37,10 +37,15 @@ CREATE TABLE IF NOT EXISTS users (
     tokens_in INTEGER NOT NULL DEFAULT 0,
     tokens_out INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL DEFAULT '',
     allowed INTEGER NOT NULL DEFAULT 0,
+    daily_limit INTEGER NOT NULL DEFAULT -1,
     added_at INTEGER NOT NULL,
     last_seen INTEGER NOT NULL
 );
@@ -109,6 +114,9 @@ class Storage:
             self._conn.execute("ALTER TABLE users ADD COLUMN web TEXT NOT NULL DEFAULT ''")
         if "case_id" not in cols:
             self._conn.execute("ALTER TABLE users ADD COLUMN case_id INTEGER NOT NULL DEFAULT 0")
+        chat_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(chats)")}
+        if chat_cols and "daily_limit" not in chat_cols:
+            self._conn.execute("ALTER TABLE chats ADD COLUMN daily_limit INTEGER NOT NULL DEFAULT -1")
         for col, ddl in (("requested_at", "INTEGER NOT NULL DEFAULT 0"), ("expires_at", "INTEGER NOT NULL DEFAULT 0"),
                          ("role", "TEXT NOT NULL DEFAULT ''"), ("limit_override", "INTEGER NOT NULL DEFAULT -1")):
             if col not in cols:
@@ -334,6 +342,23 @@ class Storage:
             "tokens_out": r["tout"], "active24": r["active"], "banned": r["banned"],
         }
 
+    # ---- persistent settings (maintenance mode, last report day, ...)
+    def get_setting(self, key: str, default: str = "") -> str:
+        r = self._one("SELECT value FROM settings WHERE key=?", (key,))
+        return r["value"] if r else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._exec("INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                   (key, str(value)))
+
+    def report_numbers(self) -> dict:
+        """Numbers for the daily admin report."""
+        day = int(time.time()) - 86400
+        new = self._one("SELECT COUNT(*) n FROM users WHERE created_at>?", (day,))["n"]
+        today = self._one("SELECT COALESCE(SUM(n),0) n FROM daily WHERE day=?", (self._today(),))["n"]
+        return {"new24": new, "msgs_today": today, "pending": self.count_users("pending"),
+                "groups": self.count_chats(), "groups_waiting": self._one("SELECT COUNT(*) n FROM chats WHERE allowed=0")["n"]}
+
     def top_users(self, n=10) -> list:
         return [dict(r) for r in self._all("SELECT * FROM users ORDER BY msgs DESC, tokens_out DESC LIMIT ?", (n,))]
 
@@ -351,6 +376,10 @@ class Storage:
 
     def set_chat_allowed(self, chat_id: int, allowed: bool) -> None:
         self._exec("UPDATE chats SET allowed=? WHERE id=?", (1 if allowed else 0, chat_id))
+
+    def set_chat_limit(self, chat_id: int, limit: int) -> None:
+        """-1 = use the default group limit, 0 = unlimited, n = messages per day for the whole group."""
+        self._exec("UPDATE chats SET daily_limit=? WHERE id=?", (int(limit), chat_id))
 
     def list_chats(self, limit=50, offset=0) -> list:
         return [dict(r) for r in self._all("SELECT * FROM chats ORDER BY allowed DESC, last_seen DESC LIMIT ? OFFSET ?",

@@ -65,7 +65,8 @@ class WebFilesMixin:
         lang = user["lang"]
         note = self.tg.send_message(chat_id, tr(lang, "🔎 أبحث في الويب…", "🔎 Searching the web…"))
         try:
-            results = websearch.search(self._web_query(last), self.cfg.web_results)
+            results = websearch.search(self._web_query(last), self.cfg.web_results,
+                                       brave_key=self.cfg.brave_api_key, searxng_url=self.cfg.searxng_url)
             pages = {}
             if results and self.cfg.web_pages:
                 top = results[:self.cfg.web_pages]
@@ -90,7 +91,9 @@ class WebFilesMixin:
             return
         lines = [f'{i}. <a href="{html.escape(r["url"], quote=True)}">{html.escape(r["title"] or r["url"], quote=False)}</a>'
                  for i, r in enumerate(results, 1)]
-        h = f"🔗 <b>{tr(user['lang'], 'المصادر', 'Sources')}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>"
+        via = websearch.LAST.get("provider") or ""
+        h = (f"🔗 <b>{tr(user['lang'], 'المصادر', 'Sources')}</b>" + (f" · <i>{html.escape(via)}</i>" if via else "")
+             + "\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>")
         self.tg.send_rich(chat_id, h, _plain(h))
 
     def show_web(self, chat_id, user, mid=None) -> None:

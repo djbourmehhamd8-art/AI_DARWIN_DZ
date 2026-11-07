@@ -23,7 +23,7 @@ FILTERS = {"": "", "b": "banned", "a": "allowed", "p": "pending", "s": "staff"}
 # callbacks a moderator may use; everything else is admin-only
 STAFF_CALLS = frozenset({"ul", "u", "ap", "ap7", "rj", "tmp", "al", "da", "ub", "bq", "ban", "top", "rq", "home"})
 TEMP_DAYS = (1, 7, 30)
-LIMITS = (("d", "default"), ("10", "10"), ("50", "50"), ("200", "200"), ("0", "∞"))
+LIMITS = (("d", "default"), ("10", "10"), ("25", "25"), ("50", "50"), ("100", "100"), ("200", "200"), ("500", "500"), ("0", "∞"))
 
 
 def _plain(h: str) -> str:
@@ -111,6 +111,17 @@ class AdminPanelMixin:
         text = f"{'👑' if full else '🛡'} <b>{title}</b> · v{__version__}\n<blockquote>" + "\n".join(lines) + "</blockquote>"
         self._html_screen(chat_id, mid, text, self.admin_kb(lang, full, pend))
 
+    def _web_status(self, lang: str) -> str:
+        from . import websearch
+        if not self.cfg.web_search:
+            return tr(lang, "البحث في الويب: معطّل", "Web search: disabled")
+        last = websearch.LAST
+        extra = (" + Brave" if self.cfg.brave_api_key else "") + (" + SearXNG" if self.cfg.searxng_url else "")
+        if not last.get("ts"):
+            return tr(lang, "البحث في الويب: لم يُستخدم بعد", "Web search: not used yet") + extra
+        return (f"{tr(lang, 'آخر بحث', 'Last search')}: {_esc(last['provider'] or 'FAILED')}" + extra
+                + ("" if last["provider"] else " ⚠️ " + _esc("; ".join(last["diag"])[:120])))
+
     def admin_sys(self, chat_id, user, mid=None) -> None:
         lang = user["lang"]
         try:
@@ -131,6 +142,7 @@ class AdminPanelMixin:
                 f"⏰ {tr(lang, 'تذكيرات معلّقة', 'Pending reminders')}: {self.db.pending_total()}\n"
                 f"👥 {tr(lang, 'مجموعات', 'Groups')}: {self.db.count_chats()} · {priv}\n"
                 f"🤖 {_esc(self.cfg.model)}\n"
+                f"🔎 {self._web_status(lang)}\n"
                 f"⏱ {fmt_duration(time.time() - self.started)}</blockquote>")
         self._html_screen(chat_id, mid, text, kb([
             [("🔄 " + tr(lang, "تحديث", "Refresh"), "adm:sys"), ("🔑 " + tr(lang, "المفاتيح", "Keys"), "adm:keys")],
@@ -181,10 +193,12 @@ class AdminPanelMixin:
         full = self.is_admin(user["id"])
         last = time.strftime("%Y-%m-%d %H:%M", time.localtime(target["last_seen"]))
         lim = target.get("limit_override", -1)
-        lim_txt = tr(lang, "افتراضي", "default") if lim is None or lim < 0 else ("∞" if lim == 0 else str(lim))
+        lim_txt = self._lim(self.default_user_limit()) if lim is None or lim < 0 else self._lim(lim)
         text = (f"👤 <b>{_esc(user_label(target))}</b> · <code>{tid}</code>\n"
                 f"<blockquote>@{_esc(target.get('username') or '-')} · {self._status_of(target)}\n"
-                f"📨 {target['msgs']} · 🧮 {target['tokens_in']}/{target['tokens_out']} tok · 📊 {tr(lang, 'حد يومي', 'daily limit')}: {lim_txt}\n"
+                f"📨 {target['msgs']} · 🧮 {target['tokens_in']}/{target['tokens_out']} tok\n"
+                f"📊 {tr(lang, 'اليوم', 'Today')}: {self.db.daily_count(tid)} / {lim_txt}"
+                f" ({tr(lang, 'الافتراضي', 'default')}: {self._lim(self.default_user_limit())})\n"
                 f"🕓 {last} · 🌐 {target['lang']}</blockquote>")
         rows = []
         if self._can_manage(user, tid):
@@ -204,6 +218,39 @@ class AdminPanelMixin:
                 rows.append([mod_btn, ("🧹 " + tr(lang, "مسح محادثته", "Clear chat"), f"adm:cq:{tid}")])
         rows.append(self._back_row(lang, "adm:ul:0", tr(lang, "المستخدمون", "Users")) + [("🏠", "m:adm")])
         self._html_screen(chat_id, mid, text, kb(rows))
+
+    @staticmethod
+    def _lim(n) -> str:
+        return "∞" if not n else str(n)
+
+    def _limit_rows(self, prefix: str, back: str) -> list:
+        btns = [(lbl, f"{prefix}:{k}") for k, lbl in LIMITS]
+        return [btns[i:i + 4] for i in range(0, len(btns), 4)] + [[("🔙", back)]]
+
+    def admin_limits(self, chat_id, user, mid=None) -> None:
+        lang = user["lang"]
+        text = (f"📊 <b>{tr(lang, 'الحدود اليومية الافتراضية', 'Default daily limits')}</b>\n<blockquote>"
+                f"👤 {tr(lang, 'لكل مستخدم', 'per user')}: <b>{self._lim(self.default_user_limit())}</b>\n"
+                f"👥 {tr(lang, 'لكل مجموعة', 'per group')}: <b>{self._lim(self.default_group_limit())}</b></blockquote>\n"
+                f"<i>{tr(lang, 'يمكن تخصيص حد لمستخدم أو مجموعة بعينها من بطاقته. «default» = القيمة من ملف .env.', 'A single user or group can have its own limit on its card. “default” = the value from .env.')}</i>")
+        rows = [[("— 👤 " + tr(lang, "حد كل مستخدم", "Per-user default") + " —", "adm:lm")]] + self._limit_rows("adm:lmu", "adm:lm")[:-1] + \
+               [[("— 👥 " + tr(lang, "حد كل مجموعة", "Per-group default") + " —", "adm:lm")]] + self._limit_rows("adm:lmg", "m:adm")
+        self._html_screen(chat_id, mid, text, kb(rows))
+
+    # ------------------------------------------------------------------ web search diagnostics
+    def adm_websearch(self, chat_id, user, args) -> None:
+        from . import websearch
+        q = args.strip() or "how many countries are in the world"
+        res, provider, diag = websearch.search_web(q, 3, brave_key=self.cfg.brave_api_key, searxng_url=self.cfg.searxng_url, stop_on_first=False)
+        lines = [f"🔎 <b>{tr(user['lang'], 'اختبار البحث في الويب', 'Web search test')}</b> — <code>{_esc(q)}</code>",
+                 "<blockquote>" + "\n".join(("✅ " if ": ok" in d else "⚠️ ") + _esc(d) for d in diag) + "</blockquote>"]
+        if res:
+            lines.append(f"{tr(user['lang'], 'أول نتيجة', 'First result')} ({_esc(provider)}): {_esc(res[0]['title'])}")
+        else:
+            lines.append("❌ " + tr(user["lang"], "فشلت كل المزوّدات. جرّب إضافة BRAVE_API_KEY (مجاني) أو SEARXNG_URL في .env.",
+                                      "Every provider failed. Add BRAVE_API_KEY (free) or SEARXNG_URL to .env."))
+        h = "\n".join(lines)
+        self.tg.send_rich(chat_id, h, _plain(h), kb([self._back_row(user["lang"])]))
 
     def _confirm(self, chat_id, mid, lang, question: str, yes: tuple, back: str) -> None:
         self._html_screen(chat_id, mid, f"⚠️ <b>{question}</b>", kb([[yes, ("❌ " + tr(lang, "إلغاء", "Cancel"), back)]]))
@@ -272,11 +319,37 @@ class AdminPanelMixin:
         lang, cid = user["lang"], row["id"]
         text = (f"👥 <b>{_esc(row['title'] or '-')}</b>\n<blockquote>🆔 <code>{cid}</code>\n"
                 f"{'✅ ' + tr(lang, 'مفعّلة', 'activated') if row['allowed'] else '⏳ ' + tr(lang, 'بانتظار التفعيل', 'waiting for activation')}\n"
+                f"📊 {tr(lang, 'اليوم', 'Today')}: {self.db.daily_count(cid)} / "
+                f"{self._lim(row['daily_limit'] if row['daily_limit'] >= 0 else self.default_group_limit())}"
+                f"{'' if row['daily_limit'] >= 0 else ' (' + tr(lang, 'افتراضي', 'default') + ')'}\n"
                 f"🕓 {time.strftime('%Y-%m-%d %H:%M', time.localtime(row['last_seen']))}</blockquote>")
         toggle = ("⛔ " + tr(lang, "إيقاف", "Deactivate"), f"adm:grv:{cid}", "danger") if row["allowed"] else \
                  ("✅ " + tr(lang, "تفعيل", "Activate"), f"adm:gok:{cid}")
         self._html_screen(chat_id, mid, text, kb([[toggle, ("🚪 " + tr(lang, "مغادرة", "Leave"), f"adm:glq:{cid}")],
+                                                  [("📊 " + tr(lang, "الحد اليومي للمجموعة", "Group daily limit"), f"adm:gli:{cid}")],
                                                   self._back_row(lang, "adm:gl:0", tr(lang, "المجموعات", "Groups"))]))
+
+    # ------------------------------------------------------------------ daily report
+    def report_html(self, lang: str) -> str:
+        s = self.db.stats()
+        r = self.db.report_numbers()
+        keys = f"{self.ai.pool.available()}/{len(self.ai.pool)}"
+        top = "\n".join(f"{i}. {_esc(user_label(u))} — 📨 {u['msgs']}" for i, u in enumerate(self.db.top_users(3), 1))
+        return (f"📊 <b>DARWIN DZ — {tr(lang, 'تقرير يومي', 'Daily report')}</b> · {time.strftime('%Y-%m-%d')}\n"
+                f"<blockquote>👥 {s['users']} {tr(lang, 'مستخدم', 'users')} (+{r['new24']} {tr(lang, 'جديد', 'new')}) · 🟢 {s['active24']} {tr(lang, 'نشط 24س', 'active 24h')} · 🚫 {s['banned']}\n"
+                f"🔔 {r['pending']} {tr(lang, 'طلب معلّق', 'pending requests')} · 👥 {r['groups']} {tr(lang, 'مجموعة', 'groups')} ({r['groups_waiting']} {tr(lang, 'بانتظار التفعيل', 'waiting')})\n"
+                f"📨 {r['msgs_today']} {tr(lang, 'رسالة اليوم', 'messages today')} · 🧮 {s['tokens_in']}/{s['tokens_out']} tok ({tr(lang, 'إجمالي', 'total')})\n"
+                f"🔑 {keys} {tr(lang, 'مفاتيح', 'keys')} · ⏱ {fmt_duration(time.time() - self.started)}</blockquote>"
+                + (f"\n🏆 <b>{tr(lang, 'الأعلى', 'Top')}</b>\n{top}" if top else ""))
+
+    def adm_report(self, chat_id, user, args) -> None:
+        h = self.report_html(user["lang"])
+        self.tg.send_rich(chat_id, h, _plain(h), kb([self._back_row(user["lang"])]))
+
+    def send_daily_report(self) -> int:
+        def build(lang):
+            return self.report_html(lang), None
+        return self.notify_staff(build, admins_only=True)
 
     # ------------------------------------------------------------------ CSV export
     def admin_csv(self, chat_id, user) -> None:
@@ -312,10 +385,13 @@ class AdminPanelMixin:
             self.admin_sys(chat_id, user, mid)
         elif v == "mnt":
             self.maintenance = not self.maintenance
+            self.db.set_setting("maintenance", "1" if self.maintenance else "0")
             self.db.add_audit(uid, "maintenance", "on" if self.maintenance else "off")
             self.admin_home(chat_id, user, mid)
         elif v == "top":
             self.admin_top(chat_id, user, mid)
+        elif v == "rep":
+            self.adm_report(chat_id, user, "")
         elif v == "csv":
             self.admin_csv(chat_id, user)
         elif v == "ul":
@@ -324,8 +400,19 @@ class AdminPanelMixin:
             except ValueError:
                 page = 0
             self.admin_users_page(chat_id, user, mid, page, parts[3] if len(parts) > 3 else "")
-        elif v in ("gl", "gc", "gok", "grv", "glq", "glv"):
-            self._group_callback(v, w, chat_id, user, mid)
+        elif v == "lm":
+            self.admin_limits(chat_id, user, mid)
+        elif v in ("lmu", "lmg"):
+            choice = parts[2] if len(parts) > 2 else ""
+            if choice in dict(LIMITS):
+                key = "limit_user" if v == "lmu" else "limit_group"
+                self.db.set_setting(key, "" if choice == "d" else choice)
+                self.db.add_audit(uid, f"default_{key}", choice)
+            self.admin_limits(chat_id, user, mid)
+        elif v == "wt":
+            self.adm_websearch(chat_id, user, "")
+        elif v in ("gl", "gc", "gok", "grv", "glq", "glv", "gli"):
+            self._group_callback(v, w, parts, chat_id, user, mid)
         elif v in ("u", "bq", "ban", "ub", "al", "da", "cq", "cy", "ap", "ap7", "rj", "tmp", "lim", "mod", "dm"):
             self._user_callback(v, w, parts, chat_id, user, mid)
         else:
@@ -335,7 +422,7 @@ class AdminPanelMixin:
             if fn:
                 fn(chat_id, user, "")
 
-    def _group_callback(self, v, w, chat_id, user, mid) -> None:
+    def _group_callback(self, v, w, parts, chat_id, user, mid) -> None:
         lang = user["lang"]
         if v == "gl":
             self.admin_groups_page(chat_id, user, mid, int(w) if (w or "0").lstrip("-").isdigit() else 0)
@@ -357,6 +444,15 @@ class AdminPanelMixin:
         elif v == "grv":
             self.db.set_chat_allowed(cid, False)
             self.db.add_audit(user["id"], "group_revoke", str(cid))
+        elif v == "gli":
+            choice = parts[3] if len(parts) > 3 else ""
+            if choice not in dict(LIMITS):
+                self._html_screen(chat_id, mid, f"📊 <b>{tr(lang, 'الحد اليومي لمجموعة', 'Daily limit for group')} {_esc(row['title'])}</b>\n"
+                                  f"<i>{tr(lang, 'عدد الرسائل التي يجيب عنها البوت يومياً في المجموعة كلها.', 'Messages the bot answers per day in the whole group.')}</i>",
+                                  kb(self._limit_rows(f"adm:gli:{cid}", f"adm:gc:{cid}")))
+                return
+            self.db.set_chat_limit(cid, -1 if choice == "d" else int(choice))
+            self.db.add_audit(user["id"], "group_limit", f"{cid}:{choice}")
         elif v == "glq":
             self._confirm(chat_id, mid, lang, tr(lang, f"مغادرة «{_esc(row['title'])}»؟", f"Leave “{_esc(row['title'])}”?"),
                           ("🚪 " + tr(lang, "نعم، غادر", "Yes, leave"), f"adm:glv:{cid}"), f"adm:gc:{cid}")
@@ -433,7 +529,7 @@ class AdminPanelMixin:
             choice = parts[3] if len(parts) > 3 else ""
             if choice not in dict(LIMITS):
                 self._html_screen(chat_id, mid, f"📊 <b>{tr(lang, 'الحد اليومي لـ', 'Daily limit for')} {name}</b>",
-                                  kb([[(lbl, f"adm:lim:{tid}:{k}") for k, lbl in LIMITS], [("🔙", back)]]))
+                                  kb(self._limit_rows(f"adm:lim:{tid}", back)))
                 return
             self._flag(user, tid, f"limit_{choice}", limit_override=-1 if choice == "d" else int(choice))
         elif v == "mod" and self.is_admin(uid):

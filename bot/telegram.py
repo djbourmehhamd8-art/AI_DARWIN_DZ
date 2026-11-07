@@ -14,6 +14,7 @@ class TelegramAPI:
         self.base = f"{base_url}/bot{token}"
         self.file_base = f"{base_url}/file/bot{token}"
         self.session = requests.Session()
+        self.poll_error = None                   # (error_code, description) of the last failed getUpdates
         self.styles_ok = True                    # False once a server rejects button colours
         self._tl = threading.local()
         adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=32)
@@ -89,7 +90,10 @@ class TelegramAPI:
             )
             data = response.json()
             if not isinstance(data, dict) or data.get("ok") is not True:
+                d = data if isinstance(data, dict) else {}
+                self.poll_error = (d.get("error_code"), d.get("description") or "")
                 return None
+            self.poll_error = None
             result = data.get("result")
             return result if isinstance(result, list) else None
         except (requests.RequestException, ValueError) as e:
@@ -160,10 +164,12 @@ class TelegramAPI:
             chat_id=chat_id, caption=caption or "",
         )
 
-    def set_my_commands(self, commands, language_code=None):
+    def set_my_commands(self, commands, language_code=None, scope=None):
         params = {"commands": commands}
         if language_code:
             params["language_code"] = language_code
+        if scope:
+            params["scope"] = scope                  # e.g. {"type": "all_group_chats"} or {"type": "chat", "chat_id": 1}
         return self.call("setMyCommands", **params)
 
     def get_file_bytes(self, file_id, max_bytes=None):

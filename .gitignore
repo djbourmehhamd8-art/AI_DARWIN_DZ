@@ -1,24 +1,31 @@
+# secrets and runtime data: NEVER commit these
 .env
 .env.*
 !.env.example
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-*.log
-*.sqlite
-*.sqlite3
+data/*
+!data/.gitkeep
 *.db
-.DS_Store
+*.db-wal
+*.db-shm
+*.log
 
-.env
-.env.*
-!.env.example
+# python / tooling
 __pycache__/
-*.py[cod]
-.venv/
+*.pyc
 venv/
-*.log
+.venv/
+.idea/
+.vscode/
+.pytest_cache/
+
+# build artefacts
+*.zip
+*.tar.gz
+
+# Additional sensitive/runtime files
 *.sqlite
 *.sqlite3
-*.db
+*.sqlite3-wal
+*.sqlite3-shm
+*.py[cod]
+.DS_Store
