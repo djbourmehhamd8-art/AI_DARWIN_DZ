@@ -1,0 +1,37 @@
+[Unit]
+Description=DARWIN DZ Telegram bot
+Documentation=file:///opt/darwin_dz/deploy/FADEHOST.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=darwin
+Group=darwin
+WorkingDirectory=/opt/darwin_dz
+ExecStart=/opt/darwin_dz/venv/bin/python main.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+
+# sandbox: the bot can only write to its data folder
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/darwin_dz/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
