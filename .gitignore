@@ -21,15 +21,3 @@ venv/
 # build artefacts
 *.zip
 *.tar.gz
-
-.env
-.env.*
-!.env.example
-__pycache__/
-*.pyc
-*.log
-*.sqlite3
-*.db
-.venv/
-venv/
-.pytest_cache/

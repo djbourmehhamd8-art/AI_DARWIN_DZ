@@ -221,8 +221,11 @@ class UIMixin:
                 [("🚫 " + tr(lang, "المحظورون", "Banned"), "adm:ul:0:b"), ("➕ " + tr(lang, "المسموحون", "Allowed"), "adm:ul:0:a")],
                 [("🔄 " + tr(lang, "تحديث", "Refresh"), "m:adm")] + self.home_row(lang),
             ])
+        web = self.cfg.web_panel_url
+        web_row = [[("🌐 " + tr(lang, "لوحة المستخدمين (ويب)", "Users web panel"), web, "primary")]] if web else []
         return kb([
             [("👥 " + tr(lang, "المستخدمون", "Users"), "adm:ul:0"), req],
+            *web_row,
             [("🔎 " + tr(lang, "بحث عن مستخدم", "Find user"), "t:adm_find"), ("🏆 " + tr(lang, "الأعلى", "Top"), "adm:top")],
             [("🚫 " + tr(lang, "المحظورون", "Banned"), "adm:ul:0:b"), ("➕ " + tr(lang, "المسموحون", "Allowed"), "adm:ul:0:a")],
             [("👥 " + tr(lang, "المجموعات", "Groups"), "adm:gl:0"), ("🛡 " + tr(lang, "المشرفون", "Staff"), "adm:ul:0:s")],

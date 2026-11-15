@@ -499,7 +499,8 @@ class AdminPanelMixin:
         elif v == "ub":
             self._flag(user, tid, "unban", banned=0)
         elif v == "al":
-            self._flag(user, tid, "allow", allowed=1, expires_at=0)
+            if self._flag(user, tid, "allow", allowed=1, expires_at=0):
+                self.grant_welcome_limit(tid)
         elif v == "da":
             self._flag(user, tid, "disallow", allowed=0, expires_at=0)
         elif v in ("ap", "ap7", "tmp") and target["banned"]:
@@ -510,6 +511,7 @@ class AdminPanelMixin:
             days = 7 if v == "ap7" else 0
             if self._flag(user, tid, "approve" if not days else f"approve_{days}d", allowed=1, requested_at=0,
                           expires_at=int(time.time()) + days * 86400 if days else 0):
+                self.grant_welcome_limit(tid)
                 self.notify_user_decision(tid, "approved", days)
                 self._html_screen(chat_id, mid, f"✅ <b>{tr(lang, 'تمت الموافقة', 'Approved')}</b> — {name} (<code>{tid}</code>)"
                                   + (f" · {days}d" if days else ""), kb([[("👤 " + tr(lang, "البطاقة", "Card"), back)] + self._back_row(lang)]))
@@ -524,6 +526,7 @@ class AdminPanelMixin:
             days = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
             if days in TEMP_DAYS and self._flag(user, tid, f"temp_{days}d", allowed=1, requested_at=0,
                                                 expires_at=int(time.time()) + days * 86400):
+                self.grant_welcome_limit(tid)
                 self.notify_user_decision(tid, "approved", days)
         elif v == "lim" and self.is_admin(uid):
             choice = parts[3] if len(parts) > 3 else ""

@@ -16,6 +16,7 @@ from bot.logsafe import RedactFilter
 from bot.preflight import harden_data_permissions, render, run_preflight
 from bot.storage import Storage
 from bot.telegram import TelegramAPI
+from bot.webpanel import WebPanel
 
 
 def setup_logging(cfg: Config) -> None:
@@ -81,6 +82,14 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
+    panel = None
+    if cfg.web_panel_port:                           # optional web user-management panel (off unless configured)
+        try:
+            panel = WebPanel(app)
+            panel.start()
+        except OSError as e:                         # port busy etc.: the bot itself must still start
+            logging.getLogger("bot").error("Web panel could not start on %s:%s: %s", cfg.web_panel_host, cfg.web_panel_port, e)
+            panel = None
     try:
         app.run()
     except RuntimeError as e:
@@ -88,6 +97,8 @@ def main() -> int:
         return 1
     finally:
         # Close every persistent HTTP/SQLite resource on normal shutdown and startup failure.
+        if panel:
+            panel.stop()
         ai.close()
         tg.close()
         db.close()

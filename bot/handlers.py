@@ -954,6 +954,7 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         self.db.ensure_user_row(uid, self.cfg.default_lang, self.cfg.default_temp)
         self.db.set_user(uid, **fields)
         self.tg.send_message(chat_id, t(user["lang"], "done"))
+        return uid
 
     def adm_ban(self, chat_id, user, args):
         self._set_flag(chat_id, user, args, "/ban", banned=1)
@@ -964,7 +965,9 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         self.db.add_audit(user["id"], "unban", args[:40])
 
     def adm_allow(self, chat_id, user, args):
-        self._set_flag(chat_id, user, args, "/allow", allowed=1)
+        uid = self._set_flag(chat_id, user, args, "/allow", allowed=1)
+        if uid:
+            self.grant_welcome_limit(uid)
         self.db.add_audit(user["id"], "allow", args[:40])
 
     def adm_disallow(self, chat_id, user, args):

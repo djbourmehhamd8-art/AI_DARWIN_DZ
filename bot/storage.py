@@ -207,6 +207,42 @@ class Storage:
             r = self._one("SELECT * FROM users WHERE LOWER(username)=LOWER(?)", (q,))
         return dict(r) if r else None
 
+    # ---- web panel listing (fixed filters / sort keys only; user text only ever travels as bound parameters)
+    _WEB_FILTERS = {"": "1=1",
+                    "pending": "u.requested_at>0 AND u.allowed=0 AND u.banned=0",
+                    "allowed": "u.allowed=1 AND u.banned=0",
+                    "banned": "u.banned=1",
+                    "rejected": "u.requested_at<0 AND u.allowed=0 AND u.banned=0",
+                    "staff": "u.role<>''"}
+    _WEB_SORTS = {"last_seen": "u.last_seen", "created": "u.created_at", "msgs": "u.msgs",
+                  "today": "COALESCE(d.n,0)", "id": "u.id"}
+
+    def _web_where(self, flt: str, q: str):
+        where, args = [self._WEB_FILTERS.get(flt, "1=1")], []
+        q = (q or "").strip().lstrip("@")[:64]
+        if q:
+            like = "%" + q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            uid = int(q) if q.lstrip("-").isdigit() and len(q) <= 15 else None
+            where.append("(u.id=? OR LOWER(u.username) LIKE ? ESCAPE '\\' OR LOWER(u.first_name) LIKE ? ESCAPE '\\')")
+            args += [uid if uid is not None else 0, like, like]
+        return " AND ".join(where), args
+
+    def search_users(self, flt: str = "", q: str = "", sort: str = "last_seen", desc: bool = True,
+                     limit: int = 25, offset: int = 0):
+        """(rows, total) for the web panel. Each row carries `today` = messages sent today."""
+        where, args = self._web_where(flt, q)
+        order = self._WEB_SORTS.get(sort, self._WEB_SORTS["last_seen"]) + (" DESC" if desc else " ASC")
+        total = self._one(f"SELECT COUNT(*) n FROM users u WHERE {where}", tuple(args))["n"]
+        rows = self._all(f"SELECT u.*, COALESCE(d.n,0) AS today FROM users u LEFT JOIN daily d "
+                         f"ON d.user_id=u.id AND d.day=? WHERE {where} ORDER BY {order}, u.id DESC LIMIT ? OFFSET ?",
+                         (self._today(), *args, max(1, min(int(limit), 5000)), max(0, int(offset))))
+        return [dict(r) for r in rows], total
+
+    def web_counts(self) -> dict:
+        out = {k or "all": self._one(f"SELECT COUNT(*) n FROM users u WHERE {v}")["n"] for k, v in self._WEB_FILTERS.items()}
+        out["today_msgs"] = self._one("SELECT COALESCE(SUM(n),0) n FROM daily WHERE day=? AND user_id>0", (self._today(),))["n"]
+        return out
+
     def broadcast_ids(self) -> list:
         return [r["id"] for r in self._all("SELECT id FROM users WHERE banned=0")]
 

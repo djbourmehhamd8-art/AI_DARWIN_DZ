@@ -3,6 +3,8 @@
 Newest first. Full notes per version are in `docs/changelog/`.
 
 ## Versions
+- **[4.4.0](docs/changelog/CHANGELOG_4.4.0.md)** — Web panel for user management
+- **[4.3.1](docs/changelog/CHANGELOG_4.3.1.md)** — Automatic 100 messages/day for approved users
 - **[4.3.0](docs/changelog/CHANGELOG_4.3.0.md)** — Live world: aircraft radar, radio, space, web portals
 - **[4.2.0](docs/changelog/CHANGELOG_4.2.0.md)** — Conversation manners, advanced tools, verified answers
 - **[4.1.0](docs/changelog/CHANGELOG_4.1.0.md)** — Strict groups, daily limits, resilient web search, GitHub-ready
@@ -19,7 +21,13 @@ Newest first. Full notes per version are in `docs/changelog/`.
 
 ---
 
-## 4.3.0 (latest) — Live world: aircraft radar, radio, space, web portals
+## 4.4.0 (latest) — Web panel for user management
+See `docs/changelog/CHANGELOG_4.4.0.md`.
+
+## 4.3.1 — Automatic daily limit (100 msgs) for approved users
+See `docs/changelog/CHANGELOG_4.3.1.md`.
+
+## 4.3.0 — Live world: aircraft radar, radio, space, web portals
 
 ## ✈️ Aircraft radar (public ADS-B)
 - `/radar <city|lat,lon> [km]` — aircraft around a place: a **text radar scope** (north up, rings, numbered contacts), a list with

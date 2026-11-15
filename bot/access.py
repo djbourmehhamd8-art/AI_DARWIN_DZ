@@ -163,10 +163,29 @@ class AccessMixin:
                                          "✅ Your request was sent to the developer. You will get a message here once approved." if delivered else
                                          f"✅ Your request was recorded. To speed it up, message @{self.cfg.contact}."))
 
+    def grant_welcome_limit(self, uid: int) -> int:
+        """On approval, give the user NEW_USER_LIMIT messages/day. Never overrides a limit an admin already chose
+        (0 = unlimited and any other value are kept). Returns the limit now in force for the user, 0 = none set here."""
+        n = int(getattr(self.cfg, "new_user_limit", 0) or 0)
+        if n <= 0 or uid in self.cfg.admin_ids:
+            return 0
+        u = self.db.get_user(uid)
+        if not u:
+            return 0
+        ov = u.get("limit_override")
+        if ov is not None and ov >= 0:
+            return 0
+        self.db.set_user(uid, limit_override=n)
+        self.db.add_audit(uid, "welcome_limit", str(n))
+        return n
+
     def notify_user_decision(self, uid: int, kind: str, days: int = 0) -> None:
         lang = self._lang_of(uid)
         if kind == "approved":
             until = tr(lang, f"\n⏳ مدة الصلاحية: {days} يوم.", f"\n⏳ Access lasts {days} day(s).") if days else ""
+            lim = (self.db.get_user(uid) or {}).get("limit_override", -1)
+            if lim is not None and lim > 0:
+                until += tr(lang, f"\n📊 حدّك اليومي: {lim} رسالة.", f"\n📊 Your daily limit: {lim} messages.")
             text = tr(lang, f"✅ <b>تم تفعيل حسابك!</b>{until}\nاضغط /start أو الزر أدناه للبدء.",
                       f"✅ <b>Your account is now active!</b>{until}\nPress /start or the button below.")
             markup = kb([[("🏠 " + tr(lang, "ابدأ", "Start"), "m:main", "success")]])

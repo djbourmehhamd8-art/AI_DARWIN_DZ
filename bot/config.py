@@ -68,6 +68,12 @@ class Config:
     price_in: float = 0.15
     price_out: float = 0.50
     daily_limit: int = 0
+    new_user_limit: int = 100          # daily messages given automatically when an admin approves a user (0 = off)
+    web_panel_port: int = 0            # web user-management panel: 0 = off, else the local port (needs WEB_PANEL_TOKEN)
+    web_panel_host: str = "127.0.0.1"  # bind address; keep 127.0.0.1 unless you put HTTPS in front of it
+    web_panel_token: str = ""          # the panel password (at least 12 characters)
+    web_panel_hosts: tuple = ()        # extra Host names accepted when the panel sits behind a reverse proxy
+    web_panel_url: str = ""            # public HTTPS address of the web panel, e.g. https://laplace.fadehost.com (adds the admin-panel button)
     groups: bool = True                # answer in groups (each group must be authorised unless GROUP_OPEN)
     group_open: bool = False           # True = answer in ANY group without authorisation
     group_triggers: tuple = ("dz", "دي زد")
@@ -92,9 +98,18 @@ class Config:
     web_results: int = 5
     web_pages: int = 2                 # how many result pages to read for excerpts (0 = snippets only)
 
+    def web_panel_hostnames(self) -> tuple:
+        """Host names the panel accepts: WEB_PANEL_HOSTS plus the host of WEB_PANEL_URL."""
+        extra = ()
+        if self.web_panel_url:
+            u = urlsplit(self.web_panel_url)
+            if u.hostname:
+                extra = (u.hostname.lower(), (u.hostname.lower() + ":" + str(u.port)) if u.port else u.hostname.lower())
+        return tuple(dict.fromkeys(self.web_panel_hosts + extra))
+
     def all_keys(self) -> list:
         from .keypool import parse_keys
-        return parse_keys(self.api_keys, self.api_key) + [k for k in (self.brave_api_key, self.nvd_api_key) if k]
+        return parse_keys(self.api_keys, self.api_key) + [k for k in (self.brave_api_key, self.nvd_api_key, self.web_panel_token) if k]
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -136,6 +151,12 @@ class Config:
             price_in=_num(e("PRICE_IN", ""), cls.price_in, float),
             price_out=_num(e("PRICE_OUT", ""), cls.price_out, float),
             daily_limit=_num(e("DAILY_LIMIT", ""), cls.daily_limit, int),
+            new_user_limit=max(0, _num(e("NEW_USER_LIMIT", ""), cls.new_user_limit, int)),
+            web_panel_port=max(0, _num(e("WEB_PANEL_PORT", ""), 0, int)),
+            web_panel_host=(e("WEB_PANEL_HOST", cls.web_panel_host).strip() or cls.web_panel_host),
+            web_panel_token=e("WEB_PANEL_TOKEN", "").strip(),
+            web_panel_hosts=tuple(h.strip().lower() for h in e("WEB_PANEL_HOSTS", "").split(",") if h.strip()),
+            web_panel_url=e("WEB_PANEL_URL", "").strip().rstrip("/"),
             groups=_bool(e("GROUPS", ""), True),
             group_open=_bool(e("GROUP_OPEN", ""), False),
             group_triggers=tuple(w.strip() for w in e("GROUP_TRIGGERS", "dz,دي زد").split(",") if w.strip()) or ("dz",),
@@ -193,6 +214,7 @@ class Config:
             ("AI_RETRIES", self.ai_retries, 0, 5),
             ("RETENTION_DAYS", self.retention_days, 0, 3650),
             ("DAILY_LIMIT", self.daily_limit, 0, 1_000_000),
+            ("NEW_USER_LIMIT", self.new_user_limit, 0, 1_000_000),
         ):
             if not isinstance(value, int) or not low <= value <= high:
                 problems.append(f"{name} must be between {low} and {high}")
@@ -202,6 +224,15 @@ class Config:
         ):
             if not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
                 problems.append(f"{name} must be between {low} and {high}")
+        if self.web_panel_port:
+            if not 1 <= self.web_panel_port <= 65535:
+                problems.append("WEB_PANEL_PORT must be between 1 and 65535")
+            if len(self.web_panel_token) < 12:
+                problems.append("WEB_PANEL_TOKEN must be at least 12 characters when WEB_PANEL_PORT is set")
+        if self.web_panel_url:
+            u = urlsplit(self.web_panel_url)
+            if u.scheme not in ("https", "http") or not u.hostname or u.username or u.password:
+                problems.append("WEB_PANEL_URL must look like https://your-domain (no user:password)")
         if (not math.isfinite(self.price_in) or not math.isfinite(self.price_out)
                 or self.price_in < 0 or self.price_out < 0):
             problems.append("PRICE_IN and PRICE_OUT must be finite, non-negative numbers")
