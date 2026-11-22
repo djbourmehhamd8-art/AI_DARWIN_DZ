@@ -1,0 +1,23 @@
+# secrets and runtime data: NEVER commit these
+.env
+.env.*
+!.env.example
+data/*
+!data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# python / tooling
+__pycache__/
+*.pyc
+venv/
+.venv/
+.idea/
+.vscode/
+.pytest_cache/
+
+# build artefacts
+*.zip
+*.tar.gz

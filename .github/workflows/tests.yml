@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Compile
+        run: python -m compileall -q bot main.py tests
+      - name: Shell scripts parse
+        run: for f in deploy/*.sh install_termux.sh start.sh stop.sh; do bash -n "$f"; done
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t .
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse committed secrets
+        run: |
+          if git grep -nE '[0-9]{8,10}:[A-Za-z0-9_-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}' -- . ':!tests' ':!bot/security' ':!docs'; then
+            echo "Possible secret committed"; exit 1
+          fi
+          test -z "$(git ls-files | grep -E '(^|/)\.env$|\.db$')" || { echo ".env or a database is tracked"; exit 1; }
