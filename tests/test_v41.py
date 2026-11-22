@@ -118,6 +118,7 @@ class DailyLimits(Base):
         self.assertEqual(self.app.default_user_limit(), self.app.cfg.daily_limit)
 
     def test_default_user_limit_is_enforced_and_personal_override_wins(self):
+        self.db.set_user(2, limit_override=-1)                                # new users start with their own 50; test the global default
         self.app.on_callback(cb(1, "adm:lmu:10"))
         for _ in range(10):
             self.db.bump_daily(2)
@@ -139,10 +140,11 @@ class DailyLimits(Base):
     def test_moderator_cannot_change_limits(self):
         self.app.on_message(message(3, "hi"))
         self.db.set_user(3, role="mod")
+        before = self.db.get_user(2)["limit_override"]
         for data in ("adm:lm", "adm:lmu:10", "adm:lmg:10", f"adm:gli:{GROUP}:10", "adm:lim:2:10"):
             self.app.on_callback(cb(3, data))
         self.assertEqual(self.db.get_setting("limit_user"), "")
-        self.assertEqual(self.db.get_user(2)["limit_override"], -1)
+        self.assertEqual(self.db.get_user(2)["limit_override"], before)
 
     def test_old_database_gets_the_group_limit_column(self):
         import os, sqlite3, tempfile

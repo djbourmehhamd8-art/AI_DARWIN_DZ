@@ -19,12 +19,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit, urlencode
 
 from .admin_panel import _cell
+from .webext import WebExtMixin
 
 log = logging.getLogger("bot.web")
 
 PAGE_SIZE = 25
 SESSION_TTL = 12 * 3600
-MAX_BODY = 8192
+MAX_BODY = 262144                                      # chat / tool inputs (Arabic text is ~9 bytes per char once URL-encoded)
 LOGIN_FAILS, LOGIN_WINDOW = 5, 300
 LOOPBACK = ("127.0.0.1", "localhost", "[::1]", "::1")
 LIMIT_CHOICES = (("d", "الافتراضي"), ("10", "10"), ("25", "25"), ("50", "50"), ("100", "100"),
@@ -64,6 +65,13 @@ td.act form{display:flex;gap:4px;flex-wrap:wrap;align-items:center}td.act button
 .pager{display:flex;gap:10px;align-items:center;justify-content:center;margin:14px 0}.pager a{color:var(--acc);text-decoration:none}
 .login{max-width:360px;margin:12vh auto;padding:20px;background:var(--card);border:1px solid var(--line);border-radius:12px}
 .login form{display:flex;flex-direction:column;gap:10px}code{font-family:ui-monospace,Menlo,Consolas,monospace}
+header .nav{margin:0;flex:1;justify-content:center}h2{font-size:17px;margin:4px 0 12px}h3{font-size:15px;margin:18px 0 8px}
+.chat{display:flex;flex-direction:column;gap:10px;margin-bottom:14px}
+.msg{max-width:85%;padding:10px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card)}
+.msg.me{align-self:flex-start;background:var(--acc);border-color:var(--acc);color:#fff}.msg.ai{align-self:flex-end}
+.msg b{font-size:12px;opacity:.75;display:block;margin-bottom:2px}.txt{white-space:pre-wrap;word-break:break-word}
+.chatform{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}.chatform textarea{font:inherit;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:9px 12px;resize:vertical;min-height:90px}
+.row{display:flex;gap:8px;margin:6px 0}pre.out{white-space:pre-wrap;word-break:break-word;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;direction:ltr;text-align:left}
 """
 
 
@@ -75,7 +83,7 @@ def _ts(ts) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "-"
 
 
-class WebPanel:
+class WebPanel(WebExtMixin):
     """Owns the logic (apply / rows / csv / pages) and the HTTP server; the logic is testable without a socket."""
 
     def __init__(self, app):
@@ -92,7 +100,7 @@ class WebPanel:
         handler = type("Handler", (_Handler,), {"panel": panel})
         self.server = ThreadingHTTPServer((self.cfg.web_panel_host, self.cfg.web_panel_port), handler)
         self.server.daemon_threads = True
-        self.thread = threading.Thread(target=self.server.serve_forever, name="web-panel", daemon=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.1}, name="web-panel", daemon=True)
         self.thread.start()
         host, port = self.server.server_address[:2]
         log.info("Web panel listening on http://%s:%s", host, port)
@@ -110,6 +118,11 @@ class WebPanel:
             self.server = None
 
     # ================================================================== auth / sessions
+    @staticmethod
+    def same(a: str, b: str) -> bool:
+        """Constant-time compare that accepts any Unicode (compare_digest on str rejects non-ASCII)."""
+        return hmac.compare_digest((a or "").encode("utf-8"), (b or "").encode("utf-8"))
+
     def check_token(self, token: str) -> bool:
         a, b = (token or "").encode("utf-8"), self.cfg.web_panel_token.encode("utf-8")
         return bool(b) and hmac.compare_digest(a, b)
@@ -123,9 +136,12 @@ class WebPanel:
 
     def login_failed(self, ip: str) -> None:
         with self._lock:
-            self.fails.setdefault(ip, []).append(time.time())
-            if len(self.fails) > 1000:
-                self.fails.clear()
+            now = time.time()
+            self.fails.setdefault(ip, []).append(now)
+            if len(self.fails) > 1000:                     # never wipe everyone's lockout: drop expired, then the oldest
+                self.fails = {k: v for k, v in self.fails.items() if v and now - v[-1] < LOGIN_WINDOW}
+                while len(self.fails) > 1000:
+                    self.fails.pop(min(self.fails, key=lambda k: self.fails[k][-1]))
 
     def new_session(self) -> str:
         sid = secrets.token_urlsafe(32)
@@ -167,14 +183,13 @@ class WebPanel:
             return False, "🛡 لا يمكن تعديل مشرف من هنا."
         name = u.get("first_name") or u.get("username") or tid
         now = int(time.time())
-        if act in ("ap", "ap7"):
+        if act == "ap":
             if u["banned"]:
                 return False, "🚫 هذا المستخدم محظور. فك الحظر أولاً."
-            days = 7 if act == "ap7" else 0
-            self.db.set_user(tid, allowed=1, requested_at=0, expires_at=now + days * 86400 if days else 0)
+            self.db.set_user(tid, allowed=1, requested_at=0)
             self.app.grant_welcome_limit(tid)
-            self._notify(tid, "approved", days)
-            msg = f"✅ تمت الموافقة على {name}" + (" لمدة 7 أيام" if days else "")
+            self._notify(tid, "approved")
+            msg = f"✅ تمت الموافقة على {name}"
         elif act == "rj":
             self.db.set_user(tid, requested_at=-now)
             self._notify(tid, "rejected")
@@ -186,7 +201,7 @@ class WebPanel:
             self.db.set_user(tid, banned=0)
             msg = f"♻️ تم فك حظر {name}"
         elif act == "da":
-            self.db.set_user(tid, allowed=0, expires_at=0)
+            self.db.set_user(tid, allowed=0)
             msg = f"⛔ تم سحب صلاحية {name}"
         elif act == "lim":
             if value not in dict(LIMIT_CHOICES):
@@ -198,9 +213,9 @@ class WebPanel:
         self.db.add_audit(0, "web_" + act, f"{tid}:{value}"[:60])
         return True, msg
 
-    def _notify(self, tid: int, kind: str, days: int = 0) -> None:
+    def _notify(self, tid: int, kind: str) -> None:
         try:
-            self.app.notify_user_decision(tid, kind, days)
+            self.app.notify_user_decision(tid, kind)
         except Exception:                                  # the change is saved even if Telegram is unreachable
             log.warning("could not notify user %s", tid, exc_info=True)
 
@@ -212,10 +227,7 @@ class WebPanel:
         if u.get("role") == "mod":
             return "مشرف", "ok"
         if u["allowed"]:
-            exp = u.get("expires_at") or 0
-            if exp and exp < now:
-                return "انتهت الصلاحية", "warn"
-            return ("مؤقت حتى " + time.strftime("%m-%d", time.localtime(exp)), "ok") if exp else ("مفعّل", "ok")
+            return "مفعّل", "ok"
         if (u.get("requested_at") or 0) > 0:
             return "بانتظار الموافقة", "warn"
         if (u.get("requested_at") or 0) < 0:
@@ -273,7 +285,9 @@ class WebPanel:
         rows, total = self.db.search_users(flt, q, sort, desc, PAGE_SIZE, (page - 1) * PAGE_SIZE)
         counts = self.db.web_counts()
         pages = max(1, -(-total // PAGE_SIZE))
-        page = min(page, pages)
+        if page > pages:                                   # e.g. after banning the last user of a filtered page
+            page = pages
+            rows, total = self.db.search_users(flt, q, sort, desc, PAGE_SIZE, (page - 1) * PAGE_SIZE)
         csrf = sess["csrf"]
         flash, sess["flash"] = sess.get("flash") or "", ""
 
@@ -311,7 +325,7 @@ class WebPanel:
                 btn = lambda a, t: f'<button name="act" value="{a}">{t}</button>'
                 acts = (f'<form method="post" action="/act"><input type="hidden" name="csrf" value="{_e(csrf)}">'
                         f'<input type="hidden" name="uid" value="{u["id"]}"><input type="hidden" name="back" value="{_e(back)}">'
-                        + btn("ap", "✅ موافقة") + btn("ap7", "⏳ 7 أيام") + btn("rj", "❌ رفض")
+                        + btn("ap", "✅ موافقة") + btn("rj", "❌ رفض")
                         + (btn("ub", "♻️ فك الحظر") if u["banned"] else btn("ban", "🚫 حظر"))
                         + (btn("da", "⛔ سحب") if u["allowed"] else "")
                         + f'<select name="value">{lim_opts}</select>' + btn("lim", "📊 حد") + '</form>')
@@ -326,14 +340,14 @@ class WebPanel:
                  + f'<span>صفحة {page} من {pages} · {total} مستخدم</span>'
                  + (f'<a href="{_e(link(p=page + 1))}">التالي ←</a>' if page < pages else "") + '</div>')
         flash_html = f'<div class="flash">{_e(flash)}</div>' if flash else ""
-        head = (f'<header><h1>🛡 DARWIN DZ — إدارة المستخدمين</h1><form method="post" action="/logout">'
-                f'<input type="hidden" name="csrf" value="{_e(csrf)}"><button>خروج</button></form></header>')
+        head = self.nav("users", csrf)
         return self.page(f'{head}<main>{flash_html}<div class="stats">{stats}</div><div class="tabs">{tabs}</div>{bar}{table}{pager}</main>')
 
 
 class _Handler(BaseHTTPRequestHandler):
     panel: WebPanel = None
     protocol_version = "HTTP/1.1"
+    timeout = 15                                             # idle/slow clients (slowloris) are dropped, not parked forever
     server_version = "DZ"
     sys_version = ""
 
@@ -383,9 +397,9 @@ class _Handler(BaseHTTPRequestHandler):
         return True
 
     def _ip(self) -> str:
-        """Client address for the login rate limit. Behind a reverse proxy (WEB_PANEL_URL set) every request comes from the
+        """Client address for the login rate limit. Behind a reverse proxy (WEB_PANEL_URL set, proxy on this machine) every request comes from the
         proxy, so use the LAST X-Forwarded-For entry (the one the proxy itself appended; earlier ones can be forged)."""
-        if self.panel.cfg.web_panel_url:
+        if self.panel.cfg.web_panel_url and self.client_address[0] in ("127.0.0.1", "::1"):   # only a LOCAL proxy may speak for a client
             xff = [x.strip() for x in (self.headers.get("X-Forwarded-For") or "").split(",") if x.strip()]
             if xff:
                 return xff[-1][:45]
@@ -410,6 +424,14 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.panel.login_page())
             if url.path == "/":
                 return self._send(200, self.panel.dashboard(sess, params))
+            if url.path == "/chat":
+                return self._send(200, self.panel.chat_page(sess))
+            if url.path == "/tools":
+                return self._send(200, self.panel.tools_page(sess))
+            if url.path == "/audit":
+                return self._send(200, self.panel.audit_page(sess))
+            if url.path == "/system":
+                return self._send(200, self.panel.system_page(sess))
             if url.path == "/export.csv":
                 return self._send(200, self.panel.export_csv(params), "text/csv; charset=utf-8",
                                   {"Content-Disposition": 'attachment; filename="darwin_users.csv"'})
@@ -425,7 +447,8 @@ class _Handler(BaseHTTPRequestHandler):
             url = urlsplit(self.path)
             form = self._form()
             if form is None:
-                return self._send(413, b"too large", "text/plain; charset=utf-8")
+                self.close_connection = True               # the unread body must not be parsed as the next request
+                return self._send(413, b"too large", "text/plain; charset=utf-8", {"Connection": "close"})
             if url.path == "/login":
                 ip = self._ip()
                 if self.panel.login_blocked(ip):
@@ -439,11 +462,21 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._redirect("/", {"Set-Cookie": self._set_cookie(sid, SESSION_TTL)})
             sid = self._cookie()
             sess = self.panel.session(sid)
-            if not sess or not hmac.compare_digest(form.get("csrf", ""), sess["csrf"]):
+            if not sess or not self.panel.same(form.get("csrf", ""), sess["csrf"]):
                 return self._send(403, b"forbidden", "text/plain; charset=utf-8")
             if url.path == "/logout":
                 self.panel.end_session(sid)
                 return self._redirect("/", {"Set-Cookie": self._set_cookie("", 0)})
+            if url.path == "/chat/send":
+                err = self.panel.chat_send(sess, form.get("persona", ""), form.get("msg", ""))
+                sess["flash"] = err
+                return self._redirect("/chat")
+            if url.path == "/chat/clear":
+                sess["chat"] = []
+                return self._redirect("/chat")
+            if url.path == "/tools/run":
+                self.panel.tools_run(sess, form.get("tool", ""), form.get("text", ""))
+                return self._redirect("/tools")
             if url.path == "/act":
                 try:
                     tid = int(form.get("uid", ""))

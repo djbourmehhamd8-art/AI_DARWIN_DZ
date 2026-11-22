@@ -14,11 +14,11 @@ class Typing:
         self._stop = threading.Event()
 
     def __enter__(self):
-        self.tg.send_chat_action(self.chat_id)
-        threading.Thread(target=self._run, daemon=True, name="typing").start()
+        threading.Thread(target=self._run, daemon=True, name="typing").start()   # the first ping must not delay the answer
         return self
 
     def _run(self):
+        self.tg.send_chat_action(self.chat_id)
         while not self._stop.wait(self.every):
             self.tg.send_chat_action(self.chat_id)
 

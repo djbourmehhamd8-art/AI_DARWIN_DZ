@@ -12,6 +12,7 @@ from .formatting import render_chunks
 from .security.secrets_guard import redact
 from .storage import case_key
 from .ui import chunk, kb, tr
+from .utils import safe_int
 
 log = logging.getLogger("bot.workspace")
 
@@ -85,12 +86,13 @@ class WorkspaceMixin:
     # ------------------------------------------------------------------ cases
     def cmd_case(self, chat_id, user, args):
         lang = user["lang"]
-        sub, _, rest = args.strip().partition(" ")
+        parts = args.strip().split(None, 1)
+        sub, rest = (parts + ["", ""])[:2]
         sub, rest = sub.lower(), rest.strip()
         if sub in ("new", "جديدة") and rest:
             self.case_create(chat_id, user, rest)
-        elif sub in ("go", "switch", "main") and (rest.isdigit() or sub == "main" or rest == "0"):
-            self.case_switch(chat_id, user, 0 if sub == "main" else int(rest), None)
+        elif sub in ("go", "switch", "main") and (sub == "main" or safe_int(rest, lo=0) is not None):
+            self.case_switch(chat_id, user, 0 if sub == "main" else safe_int(rest, 0, lo=0), None)
         elif sub:
             self.tg.send_message(chat_id, tr(lang, "الاستخدام: /case  أو  /case new <اسم>  أو  /case go <رقم>  أو  /case main",
                                              "Usage: /case  or  /case new <name>  or  /case go <id>  or  /case main"))

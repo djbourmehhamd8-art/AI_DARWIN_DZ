@@ -80,7 +80,7 @@ class FakeAI(BaseHTTPRequestHandler):
 
 def serve(handler):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
     return srv
 
 
@@ -96,6 +96,7 @@ class IntegrationTest(unittest.TestCase):
         QUEUE.clear()
         tg_srv, ai_srv = serve(FakeTelegram), serve(FakeAI)
         cfg = Config(
+            public=False,
             telegram_token="TOKEN", api_key="sk-test",
             api_base_url=f"http://127.0.0.1:{ai_srv.server_port}/v1",
             telegram_api_url=f"http://127.0.0.1:{tg_srv.server_port}",
@@ -141,6 +142,7 @@ class IntegrationTest(unittest.TestCase):
         SEEN.clear()
         tg_srv, ai_srv = serve(FakeTelegram), serve(FakeAI)
         cfg = Config(
+            public=False,
             telegram_token="TOKEN", api_key="sk-test",
             api_base_url=f"http://127.0.0.1:{ai_srv.server_port}/v1",
             telegram_api_url=f"http://127.0.0.1:{tg_srv.server_port}",
@@ -203,6 +205,7 @@ class IntegrationTest(unittest.TestCase):
         SEEN.clear()
         tg_srv, ai_srv = serve(FakeTelegram), serve(FakeAI)
         cfg = Config(
+            public=False,
             telegram_token="TOKEN", api_key="sk-test",
             api_base_url=f"http://127.0.0.1:{ai_srv.server_port}/v1",
             telegram_api_url=f"http://127.0.0.1:{tg_srv.server_port}",

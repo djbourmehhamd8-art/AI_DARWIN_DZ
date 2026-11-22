@@ -218,6 +218,10 @@ def resolve_public(host: str):
             return None
         if not ip.is_global or ip.is_multicast:                       # multicast counts as "global" in the stdlib: refuse it
             return None
+        if ip.version == 6:                                            # IPv6 forms that smuggle an IPv4 address
+            n = int(ip)
+            if n >> 32 == 0 or (n >> 32) == 0x0064ff9b0000000000000000:   # ::a.b.c.d (IPv4-compatible) and 64:ff9b::/96 (NAT64)
+                return None
         ips.append(str(ip))
     return ips[0] if ips else None
 

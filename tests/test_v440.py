@@ -141,23 +141,22 @@ class Actions(PanelBase):
         ti.CALLS.clear()
         self.assertEqual(self.act(c, uid="3", act="ap")[0], 303)
         u = self.db.get_user(3)
-        self.assertEqual((u["allowed"], u["requested_at"], u["limit_override"]), (1, 0, 100))
+        self.assertEqual((u["allowed"], u["requested_at"], u["limit_override"]), (1, 0, 50))
         self.assertTrue(any(p.get("chat_id") == 3 for m, p in ti.CALLS if m == "sendMessage"))
         self.assertIn("web_ap", [a["action"] for a in self.db.list_audit(10)])
 
-    def test_approve_7_days_ban_unban_reject_revoke_limit(self):
+    def test_approve_ban_unban_reject_revoke_limit(self):
         c = self.login()
-        self.act(c, uid="2", act="ap7")
+        self.act(c, uid="2", act="ap")
         u = self.db.get_user(2)
-        self.assertEqual(u["allowed"], 1)
-        self.assertGreater(u["expires_at"], time.time() + 6 * 86400)
+        self.assertEqual((u["allowed"], u["expires_at"]), (1, 0))
         self.act(c, uid="2", act="ban")
         self.assertEqual(self.db.get_user(2)["banned"], 1)
         self.act(c, uid="2", act="ap")                                        # banned users cannot be approved
         self.act(c, uid="2", act="ub")
         self.assertEqual(self.db.get_user(2)["banned"], 0)
         self.act(c, uid="2", act="lim", value="250")
-        self.assertEqual(self.db.get_user(2)["limit_override"], 100)          # 250 is not an offered choice: refused
+        self.assertEqual(self.db.get_user(2)["limit_override"], 50)          # 250 is not an offered choice: refused
         self.act(c, uid="2", act="lim", value="500")
         self.assertEqual(self.db.get_user(2)["limit_override"], 500)
         self.act(c, uid="2", act="lim", value="0")

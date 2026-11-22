@@ -14,7 +14,7 @@ from .i18n import t
 from .personas import TASK_PROMPTS
 from .security import (cvss, decoder, hashing, ioc, jwt_tool, mailheaders, netinfo, password, ports, timestamps,
                        urlcheck)
-from .utils import split_text
+from .utils import safe_int, split_text
 
 log = logging.getLogger("bot.sec")
 
@@ -24,7 +24,8 @@ REPLY_ARG_CMDS = frozenset({"url", "ioc", "hash", "jwt", "headers", "b64", "deco
                             "cve", "analyze", "ir", "explain", "harden", "sigma", "port", "ts", "mitre", "hex", "caesar", "entropy",
                             "domain", "dns", "whois", "cert", "webhead", "footprint", "tool", "radar", "flight", "plane", "metar", "weather", "radio",
                             "freq", "wave", "morse", "phonetic", "grid", "power", "fspl", "horizon", "dist", "subdomains", "asn", "rdns",
-                            "mac", "exposure"})
+                            "mac", "exposure", "calc", "unit", "pct", "json", "regex", "textstat", "uniq", "urlenc", "color", "caseconv",
+                            "slug", "roll", "uuid"})
 
 
 class SecurityCommands:
@@ -140,7 +141,7 @@ class SecurityCommands:
     def cmd_genpass(self, chat_id, user, args):
         if not self._sec_gate(chat_id, user):
             return
-        n = int(args) if args.strip().isdigit() else 20
+        n = safe_int(args, 20)
         n = max(8, min(n, 64))
         pw = password.generate(n)
         text = t(user["lang"], "sec_genpass_out", n=n, p="\x00")

@@ -8,6 +8,7 @@ import time
 from .brand import DETAIL_PROMPTS
 from .i18n import t
 from .personas import PERSONAS, TRANSLATOR_PROMPT
+from .utildata import UTIL_HINTS, UTIL_KINDS
 from .utils import fmt_duration
 
 log = logging.getLogger("bot.ui")
@@ -81,13 +82,14 @@ AI_TASKS = (
 )
 WORLD_KINDS = ("radar", "flight", "plane", "metar", "weather", "radio", "freq", "wave", "morse", "phonetic", "grid", "power", "fspl",
               "horizon", "dist", "subdomains", "asn", "rdns", "mac", "exposure")
-LOCAL_KINDS = frozenset(k for k, *_ in TOOLS) | frozenset(WORLD_KINDS)
+LOCAL_KINDS = frozenset(k for k, *_ in TOOLS) | frozenset(WORLD_KINDS) | frozenset(UTIL_KINDS)
 TASK_KINDS = frozenset(k for k, *_ in AI_TASKS)
 ADMIN_KINDS = {"adm_dm": "dmq", "adm_find": "find", "bc_text": None, "adm_ban": "ban", "adm_unban": "unban", "adm_allow": "allow", "adm_disallow": "disallow"}
 OTHER_KINDS = frozenset({"tool", "web_q", "mem_add", "rem_add", "sys", "case_new", "note_q"})
 ASKABLE = LOCAL_KINDS | TASK_KINDS | OTHER_KINDS | frozenset(ADMIN_KINDS)
 
 HINTS = {
+    **UTIL_HINTS,
     "radar": ("✈️ أرسل اسم مدينة (ويمكن إضافة نصف القطر بالكيلومتر) مثل: Algiers 80 أو إحداثيات 36.75,3.06", "✈️ Send a city (optionally a radius in km) such as: Algiers 80, or coordinates 36.75,3.06"),
     "flight": ("🛩 أرسل رمز الرحلة (callsign) مثل AH1001", "🛩 Send the flight callsign, e.g. AH1001"),
     "plane": ("🔎 أرسل رقم تسجيل الطائرة (7T-VJA) أو رمز hex من 6 خانات", "🔎 Send the aircraft registration (7T-VJA) or a 6-digit hex code"),
@@ -181,6 +183,7 @@ class UIMixin:
              ("⏹ " + tr(lang, "إيقاف", "Stop"), "act:stop")],
             [("🌍 " + tr(lang, "العالم المباشر", "Live world"), "m:world"), ("🔎 " + tr(lang, "بحث ويب", "Web search"), "t:web_q")],
             [("📁 " + tr(lang, "ملفات", "Files"), "m:files"), ("📚 " + tr(lang, "دليل الأدوات", "Tools guide"), "m:toolkit")],
+            [("🧮 " + tr(lang, "أدوات إضافية", "Extra tools"), "m:utils"), ("🌐 " + tr(lang, "دردشة AI (ويب)", "AI chat (web)"), "m:wc")],
             [("🧠 " + tr(lang, "الذاكرة", "Memory"), "m:mem"), ("⏰ " + tr(lang, "التذكيرات", "Reminders"), "m:rem"),
              ("⚙️ " + tr(lang, "الإعدادات", "Settings"), "m:set")],
             [("👤 " + tr(lang, "لوحتي", "My dashboard"), "act:me"), ("❓ " + tr(lang, "مساعدة", "Help"), "act:help")],
@@ -222,7 +225,7 @@ class UIMixin:
                 [("🔄 " + tr(lang, "تحديث", "Refresh"), "m:adm")] + self.home_row(lang),
             ])
         web = self.cfg.web_panel_url
-        web_row = [[("🌐 " + tr(lang, "لوحة المستخدمين (ويب)", "Users web panel"), web, "primary")]] if web else []
+        web_row = [[("🌐 " + tr(lang, "لوحة المستخدمين (ويب)", "Users web panel"), web or "adm:web", "primary")]]   # no public URL: opens a how-to screen
         return kb([
             [("👥 " + tr(lang, "المستخدمون", "Users"), "adm:ul:0"), req],
             *web_row,
@@ -426,6 +429,10 @@ class UIMixin:
                 self.show_main(chat_id, user, mid)
             elif v == "tools":
                 self.show_tools(chat_id, user, mid)
+            elif v == "utils":
+                self.show_utils(chat_id, user, mid)
+            elif v == "wc":
+                self.show_webchat(chat_id, user, mid)
             elif v == "ai":
                 self.show_ai(chat_id, user, mid)
             elif v == "set":

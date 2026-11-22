@@ -56,7 +56,21 @@ class RateLimiter:
             return True
 
 
-_DUR_PART = re.compile(r"(\d+)\s*([smhd])", re.I)
+def safe_int(text, default=None, lo: int = -10 ** 15, hi: int = 10 ** 15):
+    """Parse a user-typed integer. Never raises: junk, look-alike digits ('²'), absurdly long numbers and values
+    outside [lo, hi] (which SQLite cannot store: OverflowError) all give `default`."""
+    s = str(text if text is not None else "").strip()
+    m = re.fullmatch(r"([+-]?)(\d{1,18})", s)
+    if not m or not m.group(2).isdecimal():
+        return default
+    try:
+        n = int(s)
+    except ValueError:
+        return default
+    return n if lo <= n <= hi else default
+
+
+_DUR_PART = re.compile(r"(\d{1,10})\s*([smhd])", re.I)
 _UNIT = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 

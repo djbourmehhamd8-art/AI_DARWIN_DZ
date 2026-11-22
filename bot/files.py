@@ -8,6 +8,7 @@ import json
 import re
 import time
 import zipfile
+import zlib
 
 MAX_FILES = 60
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", "venv", ".venv", "dist", "build", ".idea", "target"}
@@ -167,7 +168,12 @@ def read_zip_project(data: bytes, max_files: int = 80, per_file: int = 60_000, m
         if len(chunks) >= max_files or total >= max_total or i.file_size > 500_000:
             skipped += 1
             continue
-        raw = z.open(i).read(per_file + 1)
+        try:
+            with z.open(i) as fh:                                   # close the entry; one bad member must not sink the archive
+                raw = fh.read(per_file + 1)
+        except (NotImplementedError, RuntimeError, EOFError, zlib.error, zipfile.BadZipFile):
+            skipped += 1                                            # unsupported compression (e.g. Deflate64), corrupt data, CRC error
+            continue
         if b"\x00" in raw[:2048]:                                   # binary
             skipped += 1
             continue

@@ -22,46 +22,46 @@ class WelcomeLimit(Base):
         from unittest.mock import patch
         base = {"TELEGRAM_TOKEN": "t", "API_KEY": "k"}
         with patch.dict(os.environ, base, clear=True):
-            self.assertEqual(Config.from_env().new_user_limit, 100)
-        with patch.dict(os.environ, {**base, "NEW_USER_LIMIT": "50"}, clear=True):
             self.assertEqual(Config.from_env().new_user_limit, 50)
+        with patch.dict(os.environ, {**base, "NEW_USER_LIMIT": "70"}, clear=True):
+            self.assertEqual(Config.from_env().new_user_limit, 70)
         with patch.dict(os.environ, {**base, "NEW_USER_LIMIT": "abc"}, clear=True):
             cfg = Config.from_env()
-            self.assertEqual(cfg.new_user_limit, 100)
+            self.assertEqual(cfg.new_user_limit, 50)
             self.assertEqual(cfg.validate(), [])
 
     def test_approve_button_sets_100_and_tells_user(self):
         self.app.on_callback(cb(2, "req:go"))
         ti.CALLS.clear()
         self.app.on_callback(cb(1, "adm:ap:2"))
-        self.assertEqual(self.limit(), 100)
-        self.assertIn("100", self.texts_to(2))
+        self.assertEqual(self.limit(), 50)
+        self.assertIn("50", self.texts_to(2))
 
     def test_all_approval_paths(self):
-        for i, data in enumerate(("adm:ap7:%d", "adm:tmp:%d:7", "adm:al:%d"), start=10):
+        for i, data in enumerate(("adm:ap:%d", "adm:al:%d"), start=10):
             self.db.ensure_user_row(i, "ar", 0.7)
             self.app.on_callback(cb(1, data % i))
-            self.assertEqual(self.limit(i), 100, data)
+            self.assertEqual(self.limit(i), 50, data)
         self.db.ensure_user_row(20, "ar", 0.7)
         self.app.on_message(message(1, "/allow 20"))
-        self.assertEqual(self.limit(20), 100)
+        self.assertEqual(self.limit(20), 50)
 
     def test_enforced_after_100_and_resets_next_day(self):
         self.app.on_callback(cb(1, "adm:ap:2"))
-        for _ in range(100):
+        for _ in range(50):
             self.db.bump_daily(2)
         ti.CALLS.clear()
         before = self.model_called()
         self.app.on_message(message(2, "one more"))
         self.assertEqual(self.model_called(), before)               # model not called
-        self.assertIn("100", self.texts_to(2))                      # told about the daily limit
+        self.assertIn("50", self.texts_to(2))                      # told about the daily limit
         self.db._exec("UPDATE daily SET day='2000-01-01' WHERE user_id=2")   # next day
         self.app.on_message(message(2, "new day"))
         self.assertIn("Echo:", self.texts_to(2))
 
     def test_99_still_allowed(self):
         self.app.on_callback(cb(1, "adm:ap:2"))
-        for _ in range(99):
+        for _ in range(49):
             self.db.bump_daily(2)
         self.app.on_message(message(2, "last one"))
         self.assertIn("Echo:", self.texts_to(2))
@@ -80,6 +80,7 @@ class WelcomeLimit(Base):
         self.assertEqual(self.limit(), 500)
 
     def test_rejected_or_banned_gets_no_limit(self):
+        self.db.set_user(2, limit_override=-1)                      # new users now start at 50; test the approval path only
         self.app.on_callback(cb(1, "adm:rj:2"))
         self.assertEqual(self.limit(), -1)
         self.db.set_user(2, banned=1)
@@ -91,6 +92,7 @@ class WelcomeLimit(Base):
 
     def test_feature_off_with_zero(self):
         self.app.cfg = dataclasses.replace(self.app.cfg, new_user_limit=0)
+        self.db.set_user(2, limit_override=-1)
         self.app.on_callback(cb(1, "adm:ap:2"))
         self.assertEqual(self.limit(), -1)
         self.assertEqual(self.db.get_user(2)["allowed"], 1)
@@ -98,3 +100,21 @@ class WelcomeLimit(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewUserDefault(Base):
+    def limit(self, uid=2):
+        return self.db.get_user(uid)["limit_override"]
+
+    def test_web_button_always_in_admin_panel(self):
+        ti.CALLS.clear()
+        self.app.on_callback(cb(1, "adm:web"))
+        self.assertTrue(any(m in ("sendMessage", "editMessageText") for m, p in ti.CALLS))
+        self.assertIn("adm:web", repr(self.app.admin_kb("ar", True, 0)))
+
+    def test_every_new_user_gets_50_on_first_contact(self):
+        self.app.on_message(message(77, "hello"))
+        self.assertEqual(self.limit(77), 50)
+        self.db.set_user(77, limit_override=0)                      # an admin choice is kept on the next message
+        self.app.on_message(message(77, "again"))
+        self.assertEqual(self.limit(77), 0)

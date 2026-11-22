@@ -1,5 +1,4 @@
-"""Access control UX: a clear 'private bot' screen, access requests with one-tap staff approval, temporary access,
-moderator role, and group support (authorised groups, "DZ <question>" trigger, welcome message)."""
+"""Access control UX: a clear 'private bot' screen, access requests with one-tap staff approval, moderator role, and group support (authorised groups, "DZ <question>" trigger, welcome message)."""
 from __future__ import annotations
 
 import html
@@ -94,7 +93,7 @@ class AccessMixin:
         lang, contact = user["lang"], self.cfg.contact
         fresh = self.db.get_user(user["id"]) or user
         rows = []
-        if not fresh.get("banned"):
+        if not fresh.get("banned") and not self.cfg.public:      # open bot: no "request access" button
             pending = (fresh.get("requested_at") or 0) > 0 and time.time() - fresh["requested_at"] < REQ_COOLDOWN
             rows.append([("⏳ " + tr(lang, "تم إرسال الطلب", "Request sent") if pending
                           else "🔑 " + tr(lang, "طلب صلاحية", "Request access"), "req:go", None if pending else "success")])
@@ -152,7 +151,7 @@ class AccessMixin:
             name = _e((fresh.get("first_name") or "").strip() or "-")
             h = (f"🔔 <b>{tr(slang, 'طلب صلاحية جديد', 'New access request')}</b>\n"
                  f"<blockquote>👤 {name} · @{_e(fresh.get('username') or '-')}\n🆔 <code>{uid}</code> · 🌐 {fresh['lang']}</blockquote>")
-            markup = kb([[("✅ " + tr(slang, "موافقة", "Approve"), f"adm:ap:{uid}"), ("⏳ " + tr(slang, "7 أيام", "7 days"), f"adm:ap7:{uid}")],
+            markup = kb([[("✅ " + tr(slang, "موافقة", "Approve"), f"adm:ap:{uid}")],
                          [("❌ " + tr(slang, "رفض", "Reject"), f"adm:rj:{uid}"), ("🚫 " + tr(slang, "حظر", "Ban"), f"adm:bq:{uid}")],
                          [("👤 " + tr(slang, "البطاقة", "Card"), f"adm:u:{uid}")]])
             return h, markup
@@ -163,7 +162,7 @@ class AccessMixin:
                                          "✅ Your request was sent to the developer. You will get a message here once approved." if delivered else
                                          f"✅ Your request was recorded. To speed it up, message @{self.cfg.contact}."))
 
-    def grant_welcome_limit(self, uid: int) -> int:
+    def grant_welcome_limit(self, uid: int, audit: bool = True) -> int:
         """On approval, give the user NEW_USER_LIMIT messages/day. Never overrides a limit an admin already chose
         (0 = unlimited and any other value are kept). Returns the limit now in force for the user, 0 = none set here."""
         n = int(getattr(self.cfg, "new_user_limit", 0) or 0)
@@ -176,13 +175,14 @@ class AccessMixin:
         if ov is not None and ov >= 0:
             return 0
         self.db.set_user(uid, limit_override=n)
-        self.db.add_audit(uid, "welcome_limit", str(n))
+        if audit:                                       # automatic grants to brand-new users are not audited (would flood the log)
+            self.db.add_audit(uid, "welcome_limit", str(n))
         return n
 
-    def notify_user_decision(self, uid: int, kind: str, days: int = 0) -> None:
+    def notify_user_decision(self, uid: int, kind: str) -> None:
         lang = self._lang_of(uid)
         if kind == "approved":
-            until = tr(lang, f"\n⏳ مدة الصلاحية: {days} يوم.", f"\n⏳ Access lasts {days} day(s).") if days else ""
+            until = ""
             lim = (self.db.get_user(uid) or {}).get("limit_override", -1)
             if lim is not None and lim > 0:
                 until += tr(lang, f"\n📊 حدّك اليومي: {lim} رسالة.", f"\n📊 Your daily limit: {lim} messages.")

@@ -73,7 +73,7 @@ def main() -> int:
 
     db = Storage(cfg.db_path)
     tg = TelegramAPI(cfg.telegram_token, cfg.telegram_api_url)
-    ai = AIClient(cfg.api_base_url, cfg.all_keys(), cfg.model, cfg.ai_timeout, cfg.ai_retries, cfg.workers * 2,
+    ai = AIClient(cfg.api_base_url, cfg.ai_keys(), cfg.model, cfg.ai_timeout, cfg.ai_retries, cfg.workers * 2,
               cfg.key_strategy)
     app = BotApp(cfg, tg, ai, db)
 

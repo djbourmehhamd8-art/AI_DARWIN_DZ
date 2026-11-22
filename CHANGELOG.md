@@ -3,6 +3,12 @@
 Newest first. Full notes per version are in `docs/changelog/`.
 
 ## Versions
+- **[4.5.2](docs/changelog/CHANGELOG_4.5.2.md)** — Bug-fix pass: multi-line command arguments, safe numeric parsing, .env parsing, damaged zip members
+- **[4.5.1](docs/changelog/CHANGELOG_4.5.1.md)** — Audit pass: 409 notice to admins, cheaper writes, faster tests
+- **[4.5.0](docs/changelog/CHANGELOG_4.5.0.md)** — AI chat in the web panel, 13 extra tools with buttons, audit & system pages
+- **[4.4.4](docs/changelog/CHANGELOG_4.4.4.md)** — Permanent access for every user (no temporary grants), history kept forever
+- **[4.4.3](docs/changelog/CHANGELOG_4.4.3.md)** — Security & correctness audit fixes
+- **[4.4.2](docs/changelog/CHANGELOG_4.4.2.md)** — Open access, 50 messages/day for every new user, web panel button for admins
 - **[4.4.0](docs/changelog/CHANGELOG_4.4.0.md)** — Web panel for user management
 - **[4.3.1](docs/changelog/CHANGELOG_4.3.1.md)** — Automatic 100 messages/day for approved users
 - **[4.3.0](docs/changelog/CHANGELOG_4.3.0.md)** — Live world: aircraft radar, radio, space, web portals
@@ -21,7 +27,22 @@ Newest first. Full notes per version are in `docs/changelog/`.
 
 ---
 
-## 4.4.0 (latest) — Web panel for user management
+## 4.5.2 (latest) — Bug-fix pass
+See `docs/changelog/CHANGELOG_4.5.2.md`.
+
+## 4.5.1 — Audit pass
+See `docs/changelog/CHANGELOG_4.5.1.md`.
+
+## 4.5.0 — AI chat on the web, extra tools
+See `docs/changelog/CHANGELOG_4.5.0.md`.
+
+## 4.4.4 — Permanent access
+See `docs/changelog/CHANGELOG_4.4.4.md`.
+
+## 4.4.3 — Security & correctness audit fixes
+See `docs/changelog/CHANGELOG_4.4.3.md`.
+
+## 4.4.0 — Web panel for user management
 See `docs/changelog/CHANGELOG_4.4.0.md`.
 
 ## 4.3.1 — Automatic daily limit (100 msgs) for approved users

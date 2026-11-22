@@ -108,26 +108,22 @@ class AccessRequests(Base):
         self.assertEqual(self.db.get_user(2)["requested_at"], 0)
 
 
-class TemporaryAccess(Base):
-    def test_grant_then_expire(self):
+class PermanentAccess(Base):
+    def test_approval_never_expires(self):
         self.app.on_message(message(2, "hi"))
-        self.app.on_callback(cb(1, "adm:tmp:2:1"))
+        self.app.on_callback(cb(1, "adm:ap:2"))
         u = self.db.get_user(2)
-        self.assertEqual(u["allowed"], 1)
-        self.assertAlmostEqual(u["expires_at"], time.time() + 86400, delta=60)
-        self.app.on_message(message(2, "still in"))
-        self.assertIn("Echo:", self.texts_to(2))
-        self.db.set_user(2, expires_at=int(time.time()) - 5)
+        self.assertEqual((u["allowed"], u["expires_at"]), (1, 0))
+        self.db.set_user(2, expires_at=int(time.time()) - 5)        # even a leftover old expiry is ignored
         ti.CALLS.clear()
-        self.app._denied_shown.clear()
-        self.app.on_message(message(2, "too late"))
-        self.assertEqual(self.db.get_user(2)["allowed"], 0)
-        self.assertIn("بوت خاص", self.texts_to(2))
-        self.assertTrue(any(a["action"] == "access_expired" for a in self.db.list_audit(10)))
+        self.app.on_message(message(2, "still in"))
+        self.assertEqual(self.db.get_user(2)["allowed"], 1)
+        self.assertIn("Echo:", self.texts_to(2))
 
-    def test_invalid_days_ignored(self):
+    def test_temporary_buttons_are_gone(self):
         self.app.on_message(message(2, "hi"))
-        self.app.on_callback(cb(1, "adm:tmp:2:9999"))
+        self.app.on_callback(cb(1, "adm:tmp:2:7"))
+        self.app.on_callback(cb(1, "adm:ap7:2"))
         self.assertEqual(self.db.get_user(2)["allowed"], 0)
 
 
@@ -155,13 +151,14 @@ class Moderators(Base):
         self.assertEqual(self.db.get_user(3)["allowed"], 1)
 
     def test_mod_cannot_use_admin_only_actions(self):
+        lim_before = self.db.get_user(3)["limit_override"]
         for data in ("adm:csv", "adm:backup", "adm:mnt", "adm:keys", "adm:gl:0", "adm:mod:3", "adm:lim:3:10", "adm:dm:3", "adm:cy:3"):
             ti.CALLS.clear()
             self.app.on_callback(cb(2, data))
             self.assertEqual(self.calls("sendDocument"), [], data)
         self.assertEqual(self.db.get_user(3)["role"], "")
         self.assertFalse(self.app.maintenance)
-        self.assertEqual(self.db.get_user(3)["limit_override"], -1)
+        self.assertEqual(self.db.get_user(3)["limit_override"], lim_before)       # unchanged by a moderator
 
     def test_mod_cannot_touch_admin_mod_or_self(self):
         self.app.on_callback(cb(1, "adm:mod:4"))                          # a second moderator
@@ -381,7 +378,7 @@ class Round2Fixes(Base):
 
     def test_stale_approve_button_cannot_unban(self):
         self.db.set_user(2, banned=1, requested_at=int(time.time()))      # banned after the request was sent
-        for data in ("adm:ap:2", "adm:ap7:2", "adm:tmp:2:7"):
+        for data in ("adm:ap:2",):
             self.app.on_callback(cb(1, data))
         u = self.db.get_user(2)
         self.assertEqual((u["banned"], u["allowed"]), (1, 0))

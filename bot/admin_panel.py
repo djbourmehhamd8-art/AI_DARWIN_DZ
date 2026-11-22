@@ -16,13 +16,12 @@ from pathlib import Path
 
 from . import __version__
 from .ui import kb, tr
-from .utils import fmt_duration
+from .utils import fmt_duration, safe_int
 
 PAGE = 8
 FILTERS = {"": "", "b": "banned", "a": "allowed", "p": "pending", "s": "staff"}
 # callbacks a moderator may use; everything else is admin-only
-STAFF_CALLS = frozenset({"ul", "u", "ap", "ap7", "rj", "tmp", "al", "da", "ub", "bq", "ban", "top", "rq", "home"})
-TEMP_DAYS = (1, 7, 30)
+STAFF_CALLS = frozenset({"ul", "u", "ap", "rj", "al", "da", "ub", "bq", "ban", "top", "rq", "home"})
 LIMITS = (("d", "default"), ("10", "10"), ("25", "25"), ("50", "50"), ("100", "100"), ("200", "200"), ("500", "500"), ("0", "∞"))
 
 
@@ -43,10 +42,6 @@ def _cell(v) -> str:
 def user_label(u: dict) -> str:
     name = (u.get("first_name") or "").strip() or (("@" + u["username"]) if u.get("username") else str(u["id"]))
     return name[:22]
-
-
-def _day(ts) -> str:
-    return time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "-"
 
 
 class AdminPanelMixin:
@@ -71,9 +66,8 @@ class AdminPanelMixin:
         if u.get("banned"):
             return "🚫 banned"
         badge = "🛡 mod · " if role == "mod" else ""
-        exp = u.get("expires_at") or 0
         if u.get("allowed") or u["id"] in self.cfg.allowed_ids:
-            return badge + "✅ allowed" + (f" ⏳ {_day(exp)}" if exp else "")
+            return badge + "✅ allowed"
         if (u.get("requested_at") or 0) > 0:
             return badge + "🔔 requested"
         return badge + "👤 " + ("public" if self.cfg.public else "no access")
@@ -149,6 +143,20 @@ class AdminPanelMixin:
             [("🔎 " + tr(lang, "تشخيص", "Diagnostics"), "adm:diag")],
             self._back_row(lang)]))
 
+    def admin_web(self, chat_id, user, mid=None) -> None:
+        """Users web panel entry for admins when no public WEB_PANEL_URL is configured."""
+        lang, port = user["lang"], self.cfg.web_panel_port
+        if port:
+            body = tr(lang, f"✅ اللوحة تعمل محلياً على المنفذ <code>{port}</code>.\nافتح في المتصفح: <code>http://127.0.0.1:{port}</code>\n"
+                            "للوصول من الخارج ضع <code>WEB_PANEL_URL=https://نطاقك</code> في <code>.env</code> وسيصبح هذا الزر رابطاً مباشراً.",
+                      f"✅ The panel is running locally on port <code>{port}</code>.\nOpen in your browser: <code>http://127.0.0.1:{port}</code>\n"
+                      "For outside access set <code>WEB_PANEL_URL=https://your-domain</code> in <code>.env</code> and this button becomes a direct link.")
+        else:
+            body = tr(lang, "⚠️ لوحة الويب غير مفعّلة. أضف في <code>.env</code>:\n<code>WEB_PANEL_PORT=8080</code>\n<code>WEB_PANEL_TOKEN=كلمة-سر-من-12-حرفاً-أو-أكثر</code>\nثم أعد تشغيل البوت.",
+                      "⚠️ The web panel is not enabled. Add to <code>.env</code>:\n<code>WEB_PANEL_PORT=8080</code>\n<code>WEB_PANEL_TOKEN=a-password-of-12+-characters</code>\nthen restart the bot.")
+        self._html_screen(chat_id, mid, "🌐 <b>" + tr(lang, "لوحة المستخدمين (ويب)", "Users web panel") + "</b>\n<blockquote>" + body + "</blockquote>",
+                          kb([self._back_row(lang)]))
+
     # ------------------------------------------------------------------ users
     def admin_users_page(self, chat_id, user, mid, page: int, flt: str) -> None:
         lang = user["lang"]
@@ -203,14 +211,12 @@ class AdminPanelMixin:
         rows = []
         if self._can_manage(user, tid):
             if (target.get("requested_at") or 0) != 0 and not target["allowed"] and not target["banned"]:
-                rows.append([("✅ " + tr(lang, "موافقة", "Approve"), f"adm:ap:{tid}"), ("⏳ " + tr(lang, "7 أيام", "7 days"), f"adm:ap7:{tid}"),
-                             ("❌ " + tr(lang, "رفض", "Reject"), f"adm:rj:{tid}")])
+                rows.append([("✅ " + tr(lang, "موافقة", "Approve"), f"adm:ap:{tid}"), ("❌ " + tr(lang, "رفض", "Reject"), f"adm:rj:{tid}")])
             ban_btn = ("✅ " + tr(lang, "فك الحظر", "Unban"), f"adm:ub:{tid}") if target["banned"] else \
                       ("🚫 " + tr(lang, "حظر", "Ban"), f"adm:bq:{tid}")
             allow_btn = ("➖ " + tr(lang, "سحب السماح", "Disallow"), f"adm:da:{tid}", "danger") if target["allowed"] else \
                         ("➕ " + tr(lang, "سماح", "Allow"), f"adm:al:{tid}")
             rows.append([ban_btn, allow_btn])
-            rows.append([(f"⏳ {d} " + tr(lang, "يوم", "d"), f"adm:tmp:{tid}:{d}") for d in TEMP_DAYS])
             if full:
                 rows.append([("✉️ " + tr(lang, "راسله", "Message"), f"adm:dm:{tid}"), ("📊 " + tr(lang, "الحد اليومي", "Limit"), f"adm:lim:{tid}")])
                 mod_btn = ("🛡 " + tr(lang, "إلغاء الإشراف", "Remove mod"), f"adm:mod:{tid}", "danger") if target.get("role") == "mod" else \
@@ -283,11 +289,13 @@ class AdminPanelMixin:
     def adm_dm_send(self, chat_id, user, args) -> None:
         """Command flow: /dm <id> <text> (the id is always explicit)."""
         self.dm_target.pop(user["id"], None)
-        first, _, rest = args.strip().partition(" ")
-        if not first.isdigit() or not rest.strip():
+        parts = args.strip().split(None, 1)
+        first, rest = (parts + ["", ""])[:2]
+        tid = safe_int(first)
+        if tid is None or not rest.strip():
             self.tg.send_message(chat_id, tr(user["lang"], "✉️ الاستخدام: /dm المعرّف النص", "✉️ Usage: /dm <id> <text>"))
             return
-        self._send_dm(chat_id, user, int(first), rest.strip())
+        self._send_dm(chat_id, user, tid, rest.strip())
 
     def _send_dm(self, chat_id, user, tid: int, text: str) -> None:
         lang = user["lang"]
@@ -355,10 +363,10 @@ class AdminPanelMixin:
     def admin_csv(self, chat_id, user) -> None:
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["id", "username", "name", "lang", "role", "allowed", "banned", "expires", "msgs", "tokens_in", "tokens_out", "last_seen"])
+        w.writerow(["id", "username", "name", "lang", "role", "allowed", "banned", "msgs", "tokens_in", "tokens_out", "last_seen"])
         for u in self.db.list_users(10 ** 6):
             w.writerow([u["id"], _cell(u.get("username")), _cell(u.get("first_name")), u["lang"], self._role_of(u),
-                        u["allowed"], u["banned"], _day(u.get("expires_at")), u["msgs"], u["tokens_in"], u["tokens_out"],
+                        u["allowed"], u["banned"], u["msgs"], u["tokens_in"], u["tokens_out"],
                         time.strftime("%Y-%m-%d %H:%M", time.localtime(u["last_seen"]))])
         self.db.add_audit(user["id"], "export_csv", "")
         self.tg.send_document(chat_id, f"users-{time.strftime('%Y%m%d-%H%M')}.csv", buf.getvalue().encode("utf-8-sig"))
@@ -383,6 +391,8 @@ class AdminPanelMixin:
                 self.adm_broadcast(chat_id, user, text)
         elif v == "sys":
             self.admin_sys(chat_id, user, mid)
+        elif v == "web":
+            self.admin_web(chat_id, user, mid)
         elif v == "mnt":
             self.maintenance = not self.maintenance
             self.db.set_setting("maintenance", "1" if self.maintenance else "0")
@@ -413,7 +423,7 @@ class AdminPanelMixin:
             self.adm_websearch(chat_id, user, "")
         elif v in ("gl", "gc", "gok", "grv", "glq", "glv", "gli"):
             self._group_callback(v, w, parts, chat_id, user, mid)
-        elif v in ("u", "bq", "ban", "ub", "al", "da", "cq", "cy", "ap", "ap7", "rj", "tmp", "lim", "mod", "dm"):
+        elif v in ("u", "bq", "ban", "ub", "al", "da", "cq", "cy", "ap", "rj", "lim", "mod", "dm"):
             self._user_callback(v, w, parts, chat_id, user, mid)
         else:
             fn = {"stats": self.adm_stats, "users": self.adm_users, "audit": self.adm_audit,
@@ -425,7 +435,7 @@ class AdminPanelMixin:
     def _group_callback(self, v, w, parts, chat_id, user, mid) -> None:
         lang = user["lang"]
         if v == "gl":
-            self.admin_groups_page(chat_id, user, mid, int(w) if (w or "0").lstrip("-").isdigit() else 0)
+            self.admin_groups_page(chat_id, user, mid, safe_int(w, 0))
             return
         try:
             cid = int(w)
@@ -499,22 +509,20 @@ class AdminPanelMixin:
         elif v == "ub":
             self._flag(user, tid, "unban", banned=0)
         elif v == "al":
-            if self._flag(user, tid, "allow", allowed=1, expires_at=0):
+            if self._flag(user, tid, "allow", allowed=1):
                 self.grant_welcome_limit(tid)
         elif v == "da":
-            self._flag(user, tid, "disallow", allowed=0, expires_at=0)
-        elif v in ("ap", "ap7", "tmp") and target["banned"]:
+            self._flag(user, tid, "disallow", allowed=0)
+        elif v == "ap" and target["banned"]:
             self.tg.send_message(chat_id, tr(lang, "🚫 هذا المستخدم محظور. فك الحظر أولاً.", "🚫 This user is banned. Unban first."))
             self.admin_user_card(chat_id, user, target, mid)
             return
-        elif v in ("ap", "ap7"):
-            days = 7 if v == "ap7" else 0
-            if self._flag(user, tid, "approve" if not days else f"approve_{days}d", allowed=1, requested_at=0,
-                          expires_at=int(time.time()) + days * 86400 if days else 0):
+        elif v == "ap":
+            if self._flag(user, tid, "approve", allowed=1, requested_at=0):
                 self.grant_welcome_limit(tid)
-                self.notify_user_decision(tid, "approved", days)
-                self._html_screen(chat_id, mid, f"✅ <b>{tr(lang, 'تمت الموافقة', 'Approved')}</b> — {name} (<code>{tid}</code>)"
-                                  + (f" · {days}d" if days else ""), kb([[("👤 " + tr(lang, "البطاقة", "Card"), back)] + self._back_row(lang)]))
+                self.notify_user_decision(tid, "approved")
+                self._html_screen(chat_id, mid, f"✅ <b>{tr(lang, 'تمت الموافقة', 'Approved')}</b> — {name} (<code>{tid}</code>)",
+                                  kb([[("👤 " + tr(lang, "البطاقة", "Card"), back)] + self._back_row(lang)]))
             return
         elif v == "rj":
             if self._flag(user, tid, "reject", requested_at=-int(time.time())):
@@ -522,12 +530,6 @@ class AdminPanelMixin:
                 self._html_screen(chat_id, mid, f"❌ <b>{tr(lang, 'تم الرفض', 'Rejected')}</b> — {name} (<code>{tid}</code>)",
                                   kb([[("👤 " + tr(lang, "البطاقة", "Card"), back)] + self._back_row(lang)]))
             return
-        elif v == "tmp":
-            days = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-            if days in TEMP_DAYS and self._flag(user, tid, f"temp_{days}d", allowed=1, requested_at=0,
-                                                expires_at=int(time.time()) + days * 86400):
-                self.grant_welcome_limit(tid)
-                self.notify_user_decision(tid, "approved", days)
         elif v == "lim" and self.is_admin(uid):
             choice = parts[3] if len(parts) > 3 else ""
             if choice not in dict(LIMITS):

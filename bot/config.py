@@ -1,34 +1,49 @@
 from __future__ import annotations
 
 import os
+import re
 import math
 from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
+
+from .utils import safe_int
 
 
 def load_env(path: str = ".env") -> None:
     p = Path(path)
     if not p.exists():
         return
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for line in p.read_text(encoding="utf-8-sig").splitlines():     # utf-8-sig: a BOM (Windows/phone editors) must not rename the first key
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        v = v.strip()
+        if v[:1] in ('"', "'"):
+            q = v[0]
+            end = v.find(q, 1)
+            v = v[1:end] if end > 0 else v[1:]                       # KEY="value"  # comment  -> value
+        else:
+            v = re.split(r"\s+#", v, maxsplit=1)[0].strip()         # KEY=value  # comment
+        k = k.strip()
+        if k.startswith("export "):
+            k = k[7:].strip()
+        if k:
+            os.environ.setdefault(k, v)
 
 
 def _ids(value: str) -> frozenset:
     out = set()
     for x in value.replace(" ", "").split(","):
-        if x.lstrip("-").isdigit():
-            out.add(int(x))
+        n = safe_int(x)
+        if n is not None:
+            out.add(n)
     return frozenset(out)
 
 
 def _bool(value: str, default: bool) -> bool:
-    if value == "":
+    if value is None or value.strip() == "":
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
 
@@ -51,7 +66,7 @@ class Config:
     telegram_api_url: str = "https://api.telegram.org"
     admin_ids: frozenset = frozenset()
     allowed_ids: frozenset = frozenset()
-    public: bool = False
+    public: bool = True                # True = anyone not banned can use the bot (no access requests); False = private bot
     db_path: str = "data/bot.db"
     log_file: str = "data/bot.log"
     log_level: str = "INFO"
@@ -68,7 +83,7 @@ class Config:
     price_in: float = 0.15
     price_out: float = 0.50
     daily_limit: int = 0
-    new_user_limit: int = 100          # daily messages given automatically when an admin approves a user (0 = off)
+    new_user_limit: int = 50           # daily messages given automatically to every NEW user (and on approval) (0 = off)
     web_panel_port: int = 0            # web user-management panel: 0 = off, else the local port (needs WEB_PANEL_TOKEN)
     web_panel_host: str = "127.0.0.1"  # bind address; keep 127.0.0.1 unless you put HTTPS in front of it
     web_panel_token: str = ""          # the panel password (at least 12 characters)
@@ -84,7 +99,7 @@ class Config:
     ai_timeout: int = 120
     ai_retries: int = 2
     default_persona: str = "default"
-    retention_days: int = 30
+    retention_days: int = 0
     digest_hour: int = -1              # local hour (0-23) for the daily admin report; -1 = off
     group_daily_limit: int = 0         # default messages per GROUP per day (0 = unlimited); admins can set it per group
     brave_api_key: str = ""            # optional: reliable web search (free key at brave.com/search/api)
@@ -107,9 +122,14 @@ class Config:
                 extra = (u.hostname.lower(), (u.hostname.lower() + ":" + str(u.port)) if u.port else u.hostname.lower())
         return tuple(dict.fromkeys(self.web_panel_hosts + extra))
 
-    def all_keys(self) -> list:
+    def ai_keys(self) -> list:
+        """ONLY the AI provider keys: these (and nothing else) may be sent to API_BASE_URL."""
         from .keypool import parse_keys
-        return parse_keys(self.api_keys, self.api_key) + [k for k in (self.brave_api_key, self.nvd_api_key, self.web_panel_token) if k]
+        return parse_keys(self.api_keys, self.api_key)
+
+    def all_keys(self) -> list:
+        """Every secret value (AI keys + Brave + NVD + panel password). For log redaction ONLY, never for requests."""
+        return self.ai_keys() + [k for k in (self.brave_api_key, self.nvd_api_key, self.web_panel_token) if k]
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -134,7 +154,7 @@ class Config:
             telegram_api_url=e("TELEGRAM_API_URL", cls.telegram_api_url).rstrip("/"),
             admin_ids=_ids(e("ADMIN_IDS", "")),
             allowed_ids=_ids(e("ALLOWED_IDS", "")),
-            public=_bool(e("PUBLIC", ""), False),
+            public=_bool(e("PUBLIC", ""), True),
             db_path=e("DB_PATH", cls.db_path),
             log_file=e("LOG_FILE", cls.log_file),
             log_level=e("LOG_LEVEL", cls.log_level).upper(),
@@ -187,7 +207,7 @@ class Config:
         problems = []
         if not self.telegram_token.strip():
             problems.append("TELEGRAM_TOKEN missing")
-        if not self.all_keys():
+        if not self.ai_keys():
             problems.append("API_KEY / API_KEYS missing")
 
         for name, value in (("API_BASE_URL", self.api_base_url),

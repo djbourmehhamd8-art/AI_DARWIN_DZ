@@ -146,7 +146,7 @@ class ButtonFlowTest(unittest.TestCase):
         ti.CALLS.clear()
         ti.SEEN.clear()
         self.tg_srv, self.ai_srv = ti.serve(ti.FakeTelegram), ti.serve(ti.FakeAI)
-        cfg = Config(telegram_token="TOKEN", api_key="sk-test",
+        cfg = Config(public=False, telegram_token="TOKEN", api_key="sk-test",
                      api_base_url=f"http://127.0.0.1:{self.ai_srv.server_port}/v1",
                      telegram_api_url=f"http://127.0.0.1:{self.tg_srv.server_port}",
                      admin_ids=frozenset({1}), stream_interval=0.0, hibp=False)

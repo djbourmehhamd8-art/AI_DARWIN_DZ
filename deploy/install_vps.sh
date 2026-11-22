@@ -24,7 +24,7 @@ if systemctl is-active --quiet darwin 2>/dev/null; then WAS_ACTIVE=1; echo "▶ 
 
 if [ "$SRC" != "$APP_DIR" ]; then
   echo "▶ copying files to $APP_DIR"
-  tar -C "$SRC" --exclude=./.env --exclude=./data --exclude=./venv --exclude=./tests --exclude='__pycache__' --exclude='*.zip' -cf - . | tar -C "$APP_DIR" -xf -
+  tar -C "$SRC" --exclude=./.env --exclude=./data --exclude=./venv --exclude=./tests --exclude=./.git --exclude='__pycache__' --exclude='*.zip' -cf - . | tar -C "$APP_DIR" -xf -
 fi
 
 echo "▶ python environment"

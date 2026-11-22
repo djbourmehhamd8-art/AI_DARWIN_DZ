@@ -5,6 +5,8 @@ import threading
 import time
 from pathlib import Path
 
+from .utils import safe_int
+
 USER_FIELDS = {"lang", "persona", "temperature", "custom_prompt", "banned", "allowed", "detail", "case_id", "web",
                "requested_at", "expires_at", "role", "limit_override"}
 
@@ -121,6 +123,7 @@ class Storage:
                          ("role", "TEXT NOT NULL DEFAULT ''"), ("limit_override", "INTEGER NOT NULL DEFAULT -1")):
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")   # fixed names above, never user text
+        self._conn.execute("UPDATE users SET expires_at=0 WHERE expires_at<>0")   # temporary access no longer exists: all grants are permanent
 
     def last_assistant(self, chat_id):
         r = self._one("SELECT content FROM messages WHERE chat_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
@@ -201,8 +204,11 @@ class Storage:
         q = (query or "").strip().lstrip("@")
         if not q:
             return None
-        if q.lstrip("-").isdigit():
-            r = self._one("SELECT * FROM users WHERE id=?", (int(q),))
+        n = safe_int(q)
+        if n is not None:
+            r = self._one("SELECT * FROM users WHERE id=?", (n,))
+        elif q.lstrip("-").isdecimal():                      # digits only but unusable as an id (too long): no such user
+            return None
         else:
             r = self._one("SELECT * FROM users WHERE LOWER(username)=LOWER(?)", (q,))
         return dict(r) if r else None
@@ -221,8 +227,8 @@ class Storage:
         where, args = [self._WEB_FILTERS.get(flt, "1=1")], []
         q = (q or "").strip().lstrip("@")[:64]
         if q:
-            like = "%" + q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            uid = int(q) if q.lstrip("-").isdigit() and len(q) <= 15 else None
+            like = "%" + "".join(c.lower() if c.isascii() else c for c in q).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            uid = safe_int(q)
             where.append("(u.id=? OR LOWER(u.username) LIKE ? ESCAPE '\\' OR LOWER(u.first_name) LIKE ? ESCAPE '\\')")
             args += [uid if uid is not None else 0, like, like]
         return " AND ".join(where), args
@@ -429,11 +435,12 @@ class Storage:
 
     # ---- facts (user memory)
     def add_fact(self, uid, text, max_n=30) -> bool:
-        n = self._one("SELECT COUNT(*) c FROM facts WHERE user_id=?", (uid,))["c"]
-        if n >= max_n:
-            return False
-        self._exec("INSERT INTO facts(user_id, text, ts) VALUES(?,?,?)", (uid, text, int(time.time())))
-        return True
+        with self._lock:                                   # count + insert atomically: concurrent /remember cannot exceed max_n
+            n = self._one("SELECT COUNT(*) c FROM facts WHERE user_id=?", (uid,))["c"]
+            if n >= max_n:
+                return False
+            self._exec("INSERT INTO facts(user_id, text, ts) VALUES(?,?,?)", (uid, text, int(time.time())))
+            return True
 
     def list_facts(self, uid) -> list:
         return [dict(r) for r in self._all("SELECT id, text FROM facts WHERE user_id=? ORDER BY id", (uid,))]
@@ -472,9 +479,14 @@ class Storage:
         return time.strftime("%Y-%m-%d", time.gmtime())
 
     def bump_daily(self, uid) -> None:
-        self._exec("INSERT INTO daily(user_id, day, n) VALUES(?,?,1) "
-                   "ON CONFLICT(user_id, day) DO UPDATE SET n=n+1", (uid, self._today()))
-        self._exec("DELETE FROM daily WHERE day < date('now','-7 day')")
+        with self._lock:                                   # one commit; old rows are pruned at most once an hour, not on every message
+            self._conn.execute("INSERT INTO daily(user_id, day, n) VALUES(?,?,1) "
+                               "ON CONFLICT(user_id, day) DO UPDATE SET n=n+1", (uid, self._today()))
+            now = time.monotonic()
+            if now - getattr(self, "_daily_pruned", -1e9) > 3600:
+                self._daily_pruned = now
+                self._conn.execute("DELETE FROM daily WHERE day < date('now','-7 day')")
+            self._conn.commit()
 
     def daily_count(self, uid) -> int:
         r = self._one("SELECT n FROM daily WHERE user_id=? AND day=?", (uid, self._today()))
@@ -482,9 +494,12 @@ class Storage:
 
     # ---- audit log (security-relevant events: admin actions, secret leaks blocked, denied access)
     def add_audit(self, uid, action, detail="", keep=2000) -> None:
-        self._exec("INSERT INTO audit(ts, user_id, action, detail) VALUES(?,?,?,?)",
-                   (int(time.time()), uid, action, detail[:300]))
-        self._exec("DELETE FROM audit WHERE id <= (SELECT MAX(id) FROM audit) - ?", (keep,))
+        with self._lock:                                   # one commit; trimming every 50th entry keeps the table bounded
+            cur = self._conn.execute("INSERT INTO audit(ts, user_id, action, detail) VALUES(?,?,?,?)",
+                                     (int(time.time()), uid, action, detail[:300]))
+            if cur.lastrowid % 50 == 0:
+                self._conn.execute("DELETE FROM audit WHERE id <= (SELECT MAX(id) FROM audit) - ?", (keep,))
+            self._conn.commit()
 
     def list_audit(self, limit=20) -> list:
         return [dict(r) for r in self._all("SELECT ts, user_id, action, detail FROM audit ORDER BY id DESC LIMIT ?", (limit,))]

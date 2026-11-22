@@ -128,27 +128,29 @@ class WebAnswers(Harness):
 
     def test_auto_mode_searches_and_cites(self):
         self.run_msg("ما هو آخر إصدار من nginx")
-        system = ti.SEEN[-1][0]["content"]
-        self.assertIn("retrieved just now", system)
-        self.assertIn("page body about nginx", system)
+        sent = ti.SEEN[-1]
+        self.assertNotIn("retrieved just now", sent[0]["content"])           # never in the system message (4.4.3)
+        turn = sent[-1]["content"]                                            # fenced, in the user's turn
+        self.assertIn("retrieved just now", turn)
+        self.assertIn("page body about nginx", turn)
         self.assertIn("🔗", self.texts())
         self.assertIn("nginx.org", self.texts())
 
     def test_plain_question_does_not_search(self):
         self.run_msg("اشرح الفرق بين TCP و UDP")
-        self.assertNotIn("retrieved just now", ti.SEEN[-1][0]["content"])
+        self.assertNotIn("retrieved just now", ti.SEEN[-1][-1]["content"])
 
     def test_off_mode_never_searches(self):
         self.app.on_message(message(1, "/web off"))
         self.run_msg("ما هو آخر إصدار من nginx")
-        self.assertNotIn("retrieved just now", ti.SEEN[-1][0]["content"])
+        self.assertNotIn("retrieved just now", ti.SEEN[-1][-1]["content"])
 
     def test_search_command_forces(self):
         with mock.patch("bot.web_files.websearch.search", return_value=self.FAKE) as s, \
                 mock.patch("bot.web_files.websearch.fetch_text", return_value=""):
             self.app.on_message(message(1, "/search اشرح TCP"))
         self.assertTrue(s.called)
-        self.assertIn("retrieved just now", ti.SEEN[-1][0]["content"])
+        self.assertIn("retrieved just now", ti.SEEN[-1][-1]["content"])
 
     def test_failure_falls_back(self):
         with mock.patch("bot.web_files.websearch.search", return_value=[]):
