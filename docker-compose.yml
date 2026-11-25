@@ -1,0 +1,23 @@
+# docker compose up -d --build      (needs a .env next to this file: copy .env.example and fill TELEGRAM_TOKEN, API_KEY, ADMIN_IDS)
+services:
+  darwin:
+    build: .
+    restart: unless-stopped
+    read_only: true                  # the image is immutable; only /app/data and /tmp are writable
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 512m
+    env_file: .env
+    environment:
+      WEB_PANEL_HOST: 0.0.0.0        # inside the container only; the host port below is bound to localhost
+      WEB_PANEL_PORT: "8080"
+      DB_PATH: /app/data/bot.db
+      LOG_FILE: /app/data/bot.log
+    ports:
+      - "127.0.0.1:8080:8080"        # put HTTPS (Caddy/Nginx) in front before exposing it, and set WEB_PANEL_URL
+    volumes:
+      - darwin-data:/app/data
+volumes:
+  darwin-data:

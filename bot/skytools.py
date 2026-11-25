@@ -12,9 +12,11 @@ import urllib.parse
 
 import requests
 
+from . import USER_AGENT
+
 from . import radiotools as R
 
-UA = "DarwinBot/4.3 (Telegram security & radio assistant)"
+UA = f"{USER_AGENT} (Telegram security & radio assistant)"
 _cache: dict = {}
 _lock = threading.Lock()
 _last_hit: dict = {}
@@ -197,7 +199,8 @@ def _last_kp(data):
     if isinstance(last, list):
         return float(last[1]), last[0]
     if isinstance(last, dict):
-        return float(last.get("Kp") or last.get("kp_index")), last.get("time_tag", "")
+        kp = last.get("Kp") if last.get("Kp") is not None else last.get("kp_index")   # 0 is a real value, not "missing"
+        return float(kp), last.get("time_tag", "")
     return None, ""
 
 

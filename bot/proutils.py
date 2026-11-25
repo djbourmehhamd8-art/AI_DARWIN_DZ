@@ -8,12 +8,16 @@ import ast
 import base64
 import binascii
 import colorsys
+import datetime as _dt
+import ipaddress
+import itertools
 import json
 import math
 import operator
 import re
 import secrets
 import string
+import threading
 import urllib.parse
 import uuid
 from collections import Counter
@@ -67,6 +71,8 @@ def calc(expr: str):
         raise ValueError("division by zero")
     except (OverflowError, TypeError):
         raise ValueError("cannot compute")
+    if isinstance(r, complex):                                      # (-8)**0.5 -> complex in Python: not a real number
+        raise ValueError("cannot compute")
     if isinstance(r, float):
         if math.isnan(r) or math.isinf(r):
             raise ValueError("cannot compute")
@@ -81,14 +87,35 @@ def json_pretty(text: str) -> dict:
     text = (text or "").strip()
     if not text:
         raise ValueError("empty")
+    depth = peak = 0
+    in_str = esc = False
+    for ch in text:                                         # explicit bound: newer CPython parses 5000 levels fine, older ones crash/recurse
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "[{":
+            depth += 1
+            peak = max(peak, depth)
+            if peak > 200:
+                raise ValueError("JSON is nested too deeply")
+        elif ch in "]}":
+            depth -= 1
     try:
         obj = json.loads(text)
+        kind = type(obj).__name__
+        size = len(obj) if isinstance(obj, (dict, list)) else 1
+        return {"pretty": json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=False),
+                "compact": json.dumps(obj, ensure_ascii=False, separators=(",", ":")), "type": kind, "size": size}
     except json.JSONDecodeError as e:
         raise ValueError(f"invalid JSON: line {e.lineno} col {e.colno}: {e.msg}")
-    kind = type(obj).__name__
-    size = len(obj) if isinstance(obj, (dict, list)) else 1
-    return {"pretty": json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=False),
-            "compact": json.dumps(obj, ensure_ascii=False, separators=(",", ":")), "type": kind, "size": size}
+    except RecursionError:                                  # "[[[[[…" nested a thousand levels deep
+        raise ValueError("JSON is nested too deeply")
 
 
 # ---------------------------------------------------------------- regex tester ("pattern :: text")
@@ -105,14 +132,54 @@ def regex_test(arg: str) -> dict:
             or re.search(r"\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)[+*{]", pat)):   # (a+)+ style: catastrophic backtracking
         raise ValueError("pattern rejected (nested quantifiers can hang the bot)")
     try:
-        rx = re.compile(pat)
+        re.compile(pat)
     except re.error as e:
         raise ValueError(f"invalid pattern: {e}")
-    out = []
-    for m in rx.finditer(text):
-        out.append({"span": m.span(), "text": m.group(0)[:200], "groups": [g[:100] if g else g for g in m.groups()]})
-        if len(out) >= 20:
-            break
+    return _regex_isolated(pat, text)
+
+
+_REGEX_CHILD = (
+    "import json,re,sys\n"
+    "try:\n"
+    " import resource\n"
+    " resource.setrlimit(resource.RLIMIT_AS,(768<<20,768<<20))\n"      # a hostile pattern cannot eat the host's RAM
+    " resource.setrlimit(resource.RLIMIT_CPU,(5,5))\n"                 # hard CPU backstop next to the caller's wall-clock timeout
+    "except Exception:\n"
+    " pass\n"
+    "d=json.loads(sys.stdin.read())\n"
+    "rx=re.compile(d['p'])\n"
+    "out=[]\n"
+    "for m in rx.finditer(d['t']):\n"
+    " out.append({'span':list(m.span()),'text':m.group(0)[:200],'groups':[g[:100] if g else g for g in m.groups()]})\n"
+    " if len(out)>=20: break\n"
+    "print(json.dumps(out))\n"
+)
+
+
+_REGEX_SLOTS = threading.BoundedSemaphore(4)
+
+
+def _regex_isolated(pat: str, text: str, timeout: float = 2.0) -> dict:
+    """Match in a throw-away interpreter. The `re` engine never releases the GIL, so a pattern like (a?){30}a{30} in-process would freeze the
+    whole bot (and the web panel); a child process can simply be killed. The nested-quantifier check above is only a cheap first filter."""
+    import subprocess
+    import sys
+    if not _REGEX_SLOTS.acquire(blocking=False):                     # the public /t page is unauthenticated: never fork without a ceiling
+        raise ValueError("regex tester busy, try again in a moment")
+    try:
+        r = subprocess.run([sys.executable, "-I", "-c", _REGEX_CHILD], input=json.dumps({"p": pat, "t": text}),
+                           capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        raise ValueError("pattern too slow (possible catastrophic backtracking) - stopped")
+    except OSError:
+        raise ValueError("regex sandbox unavailable")
+    finally:
+        _REGEX_SLOTS.release()
+    if r.returncode != 0:
+        raise ValueError("pattern could not be evaluated")
+    out = json.loads(r.stdout or "[]")
+    for m in out:
+        m["span"] = tuple(m["span"])
     return {"pattern": pat, "count": len(out), "matches": out}
 
 
@@ -289,3 +356,123 @@ def percent(arg: str) -> dict:
             raise ValueError("division by zero")
         return {"text": f"{m.group(1)} → {m.group(2)}: {round((float(m.group(2)) - a) / abs(a) * 100, 4):+g}%"}
     raise ValueError("format: 15% of 200 | 30 of 120 | 50 to 75")
+
+
+# ---------------------------------------------------------------- subnet calculator
+def subnet_calc(arg: str) -> dict:
+    """`10.0.0.0/24`, `192.168.1.10 255.255.255.0`, or either followed by `/26` / `to 26` to split into smaller subnets."""
+    parts = (arg or "").replace(",", " ").split()
+    if not parts:
+        raise ValueError("empty input")
+    split_to = None
+    if len(parts) >= 2 and parts[-1].lstrip("/").isdigit() and (parts[-2].lower() == "to" or "/" in parts[0] or len(parts) == 3):
+        split_to = int(parts[-1].lstrip("/"))
+        parts = [p for p in parts[:-1] if p.lower() != "to"]
+    try:
+        net = ipaddress.ip_network("/".join(parts) if len(parts) == 2 and "/" not in parts[0] and "." not in parts[1] else
+                                   (parts[0] + "/" + parts[1] if len(parts) == 2 else parts[0]), strict=False)
+    except ValueError as e:
+        raise ValueError(f"invalid network: {str(e)[:80]}")
+    v4 = net.version == 4
+    n = net.num_addresses
+    hosts = max(n - 2, 0) if v4 and net.prefixlen < 31 else n
+    first = net[1] if v4 and net.prefixlen < 31 else net[0]
+    last = net[-2] if v4 and net.prefixlen < 31 else net[-1]
+    out = {"version": net.version, "network": str(net.network_address), "prefix": net.prefixlen, "netmask": str(net.netmask),
+           "wildcard": str(net.hostmask) if v4 else "", "broadcast": str(net.broadcast_address) if v4 else "",
+           "first": str(first), "last": str(last), "hosts": hosts, "addresses": n, "private": net.is_private,
+           "cidr": str(net), "subnets": [], "subnet_count": 0}
+    if split_to is not None:
+        if split_to <= net.prefixlen or split_to > net.max_prefixlen:
+            raise ValueError(f"split prefix must be between /{net.prefixlen + 1} and /{net.max_prefixlen}")
+        if split_to - net.prefixlen > 16:
+            raise ValueError("too many subnets (max 2^16)")
+        out["subnet_count"] = 2 ** (split_to - net.prefixlen)
+        out["subnets"] = [str(x) for x in itertools.islice(net.subnets(new_prefix=split_to), 16)]
+    return out
+
+
+# ---------------------------------------------------------------- cron explainer
+_MONTHS = {m: i for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split(), 1)}
+_DOWS = {d: i for i, d in enumerate("sun mon tue wed thu fri sat".split())}
+_MACROS = {"@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *", "@weekly": "0 0 * * 0",
+           "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *"}
+_FIELDS = ((0, 59, None), (0, 23, None), (1, 31, None), (1, 12, _MONTHS), (0, 7, _DOWS))
+_FIELD_NAMES = (("الدقيقة", "minute"), ("الساعة", "hour"), ("يوم الشهر", "day of month"), ("الشهر", "month"), ("يوم الأسبوع", "day of week"))
+
+
+def _cron_field(text: str, lo: int, hi: int, names) -> set:
+    vals: set = set()
+    for item in text.split(","):
+        if not item:
+            raise ValueError("empty list item")
+        base, _, step = item.partition("/")
+        if step and (not step.isdigit() or int(step) < 1):
+            raise ValueError(f"bad step: {step[:10]}")
+        st = int(step) if step else 1
+
+        def num(x: str) -> int:
+            x = x.lower()
+            if names and x in names:
+                return names[x]
+            if not x.isdigit():
+                raise ValueError(f"bad value: {x[:12]}")
+            return int(x)
+        if base in ("*", "?"):
+            a, b = lo, hi
+        elif "-" in base:
+            l, _, r = base.partition("-")
+            a, b = num(l), num(r)
+        else:
+            a = num(base)
+            b = hi if step else a
+        if not (lo <= a <= hi and lo <= b <= hi) or a > b:
+            raise ValueError(f"value out of range {lo}-{hi}: {item[:12]}")
+        vals.update(range(a, b + 1, st))
+    return vals
+
+
+def _cron_phrase(raw: str, i: int, vals: set) -> tuple:
+    ar, en = _FIELD_NAMES[i]
+    if raw in ("*", "?"):
+        return (f"كل {ar}", f"every {en}")
+    if raw.startswith("*/") and raw[2:].isdigit():
+        return (f"كل {raw[2:]} من ({ar})", f"every {raw[2:]} ({en})")
+    shown = ", ".join(map(str, sorted(vals)[:12])) + ("…" if len(vals) > 12 else "")
+    return (f"{ar}: {shown}", f"{en}: {shown}")
+
+
+def cron_explain(expr: str, count: int = 5, start: "_dt.datetime | None" = None) -> dict:
+    """Parse a 5-field cron expression (or @macro), explain each field and list the next runs (UTC)."""
+    e = " ".join((expr or "").split())[:200]
+    e = re.sub(r"^(?:cron\s*[:=]\s*)", "", e, flags=re.I)
+    e = _MACROS.get(e.lower(), e)
+    f = e.split(" ")
+    if len(f) != 5:
+        raise ValueError("expected 5 fields: minute hour day-of-month month day-of-week")
+    sets = [_cron_field(x, *_FIELDS[i]) for i, x in enumerate(f)]
+    sets[4] = {d % 7 for d in sets[4]}                      # 7 == Sunday
+    dom_star, dow_star = f[2] in ("*", "?"), f[4] in ("*", "?")
+    start = (start or _dt.datetime.now(_dt.timezone.utc)).replace(second=0, microsecond=0)
+    runs: list = []
+    day = start.replace(hour=0, minute=0)
+    for _ in range(366 * 8):
+        if day.month in sets[3]:
+            in_dom, in_dow = day.day in sets[2], (day.isoweekday() % 7) in sets[4]
+            ok = (in_dom and in_dow) if (dom_star or dow_star) else (in_dom or in_dow)
+            if ok:
+                for h in sorted(sets[1]):
+                    for m in sorted(sets[0]):
+                        t = day.replace(hour=h, minute=m)
+                        if t > start:
+                            runs.append(t.strftime("%Y-%m-%d %H:%M UTC (%a)"))
+                            if len(runs) >= count:
+                                break
+                    if len(runs) >= count:
+                        break
+        if len(runs) >= count:
+            break
+        day += _dt.timedelta(days=1)
+    fields = [{"raw": f[i], "phrase": _cron_phrase(f[i], i, sets[i])} for i in range(5)]
+    return {"expr": e, "fields": fields, "next": runs, "dom_dow_or": not (dom_star or dow_star)}
+

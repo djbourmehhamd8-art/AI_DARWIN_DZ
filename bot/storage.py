@@ -89,11 +89,20 @@ CREATE TABLE IF NOT EXISTS daily (
     user_id INTEGER NOT NULL, day TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, day)
 );
+CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'other', text TEXT NOT NULL, ctx TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open', reply TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id);
+CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id, id);
 """
 
 
 class Storage:
     def __init__(self, path: str):
+        self._path = path
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
@@ -123,6 +132,10 @@ class Storage:
                          ("role", "TEXT NOT NULL DEFAULT ''"), ("limit_override", "INTEGER NOT NULL DEFAULT -1")):
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")   # fixed names above, never user text
+        for ddl in ("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts)", "CREATE INDEX IF NOT EXISTS idx_audit_user ON audit(user_id, ts)",
+                    "CREATE INDEX IF NOT EXISTS idx_users_seen ON users(last_seen)", "CREATE INDEX IF NOT EXISTS idx_users_created ON users(created_at)",
+                    "CREATE INDEX IF NOT EXISTS idx_daily_day ON daily(day)"):       # keep the web panel fast on large databases
+            self._conn.execute(ddl)
         self._conn.execute("UPDATE users SET expires_at=0 WHERE expires_at<>0")   # temporary access no longer exists: all grants are permanent
 
     def last_assistant(self, chat_id):
@@ -248,9 +261,6 @@ class Storage:
         out = {k or "all": self._one(f"SELECT COUNT(*) n FROM users u WHERE {v}")["n"] for k, v in self._WEB_FILTERS.items()}
         out["today_msgs"] = self._one("SELECT COALESCE(SUM(n),0) n FROM daily WHERE day=? AND user_id>0", (self._today(),))["n"]
         return out
-
-    def broadcast_ids(self) -> list:
-        return [r["id"] for r in self._all("SELECT id FROM users WHERE banned=0")]
 
     def broadcast_users(self) -> list:
         return [dict(r) for r in self._all("SELECT * FROM users WHERE banned=0")]
@@ -485,7 +495,7 @@ class Storage:
             now = time.monotonic()
             if now - getattr(self, "_daily_pruned", -1e9) > 3600:
                 self._daily_pruned = now
-                self._conn.execute("DELETE FROM daily WHERE day < date('now','-7 day')")
+                self._conn.execute("DELETE FROM daily WHERE day < date('now','-35 day')")   # 5 weeks: enough for the admin panel's charts
             self._conn.commit()
 
     def daily_count(self, uid) -> int:
@@ -503,6 +513,131 @@ class Storage:
 
     def list_audit(self, limit=20) -> list:
         return [dict(r) for r in self._all("SELECT ts, user_id, action, detail FROM audit ORDER BY id DESC LIMIT ?", (limit,))]
+
+    def search_audit(self, q: str = "", action: str = "", limit: int = 50, offset: int = 0):
+        """(rows, total) for the web panel: optional text filter (action/detail/user id) and action prefix."""
+        where, args = ["1=1"], []
+        if action:
+            where.append("action LIKE ? ESCAPE '\\'")
+            args.append(action.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+        if q:
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("(action LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR CAST(user_id AS TEXT) LIKE ? ESCAPE '\\')")
+            args += [like, like, like]
+        w = " AND ".join(where)
+        total = self._one(f"SELECT COUNT(*) n FROM audit WHERE {w}", tuple(args))["n"]
+        rows = self._all(f"SELECT ts, user_id, action, detail FROM audit WHERE {w} ORDER BY id DESC LIMIT ? OFFSET ?",
+                         (*args, max(1, min(int(limit), 500)), max(0, int(offset))))
+        return [dict(r) for r in rows], total
+
+    def audit_actions(self) -> list:
+        return [r["a"] for r in self._all("SELECT DISTINCT substr(action,1,instr(action||'_','_')-1) a FROM audit ORDER BY a LIMIT 30")]
+
+    # ---- user reports (problems, wrong tool results, ideas, abuse) sent with /report
+    REPORT_KINDS = ("bug", "tool", "idea", "abuse", "other")
+
+    def add_report(self, uid: int, kind: str, text: str, ctx: str = "") -> int:
+        now = int(time.time())
+        kind = kind if kind in self.REPORT_KINDS else "other"
+        cur = self._exec("INSERT INTO reports(user_id, kind, text, ctx, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                         (uid, kind, text[:2000], ctx[:200], now, now))
+        self._exec("DELETE FROM reports WHERE status='closed' AND id <= (SELECT MAX(id) FROM reports) - 5000")   # bounded table
+        return cur.lastrowid
+
+    def get_report(self, rid: int):
+        r = self._one("SELECT r.*, u.username, u.first_name, u.lang FROM reports r LEFT JOIN users u ON u.id=r.user_id WHERE r.id=?", (rid,))
+        return dict(r) if r else None
+
+    def list_reports(self, status: str = "", kind: str = "", q: str = "", limit: int = 20, offset: int = 0):
+        where, args = ["1=1"], []
+        if status in ("open", "closed"):
+            where.append("r.status=?")
+            args.append(status)
+        if kind in self.REPORT_KINDS:
+            where.append("r.kind=?")
+            args.append(kind)
+        if q:
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("(r.text LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\' OR u.first_name LIKE ? ESCAPE '\\' OR CAST(r.user_id AS TEXT)=?)")
+            args += [like, like, like, q.strip()]
+        w = " AND ".join(where)
+        total = self._one(f"SELECT COUNT(*) n FROM reports r LEFT JOIN users u ON u.id=r.user_id WHERE {w}", tuple(args))["n"]
+        rows = self._all(f"SELECT r.*, u.username, u.first_name FROM reports r LEFT JOIN users u ON u.id=r.user_id WHERE {w} "
+                         f"ORDER BY (r.status='open') DESC, r.id DESC LIMIT ? OFFSET ?", (*args, max(1, min(int(limit), 200)), max(0, int(offset))))
+        return [dict(r) for r in rows], total
+
+    def report_counts(self) -> dict:
+        out = {"open": 0, "closed": 0}
+        for r in self._all("SELECT status, COUNT(*) n FROM reports GROUP BY status"):
+            out[r["status"]] = r["n"]
+        out["all"] = out["open"] + out["closed"]
+        return out
+
+    def set_report(self, rid: int, status: str = "", reply: "str | None" = None) -> bool:
+        sets, args = ["updated_at=?"], [int(time.time())]
+        if status in ("open", "closed"):
+            sets.append("status=?")
+            args.append(status)
+        if reply is not None:
+            sets.append("reply=?")
+            args.append(reply[:2000])
+        args.append(rid)
+        return self._exec(f"UPDATE reports SET {', '.join(sets)} WHERE id=?", tuple(args)).rowcount > 0
+
+    def delete_report(self, rid: int) -> bool:
+        return self._exec("DELETE FROM reports WHERE id=?", (rid,)).rowcount > 0
+
+    def reports_of_user(self, uid: int, limit: int = 10) -> list:
+        return [dict(r) for r in self._all("SELECT * FROM reports WHERE user_id=? ORDER BY id DESC LIMIT ?", (uid, limit))]
+
+    def reports_since(self, uid: int, seconds: int = 86400) -> int:
+        return self._one("SELECT COUNT(*) n FROM reports WHERE user_id=? AND created_at>?", (uid, int(time.time()) - seconds))["n"]
+
+    def open_reports_of(self, uid: int) -> int:
+        return self._one("SELECT COUNT(*) n FROM reports WHERE user_id=? AND status='open'", (uid,))["n"]
+
+    # ---- overview numbers for the admin web panel
+    def messages_series(self, days: int = 14) -> list:
+        """[(YYYY-MM-DD, messages, active users)] oldest first, zero-filled."""
+        days = max(1, min(int(days), 35))
+        got = {r["day"]: (r["m"], r["u"]) for r in self._all(
+            "SELECT day, SUM(n) m, COUNT(*) u FROM daily WHERE user_id>0 AND day>=date('now', ?) GROUP BY day", (f"-{days - 1} day",))}
+        out = []
+        for i in range(days - 1, -1, -1):
+            d = time.strftime("%Y-%m-%d", time.gmtime(time.time() - i * 86400))
+            out.append((d, *got.get(d, (0, 0))))
+        return out
+
+    def signups_series(self, days: int = 14) -> list:
+        days = max(1, min(int(days), 90))
+        got = {r["d"]: r["n"] for r in self._all(
+            "SELECT date(created_at,'unixepoch') d, COUNT(*) n FROM users WHERE created_at>? GROUP BY d", (int(time.time()) - days * 86400,))}
+        return [(d, got.get(d, 0)) for d in (time.strftime("%Y-%m-%d", time.gmtime(time.time() - i * 86400)) for i in range(days - 1, -1, -1))]
+
+    def overview_numbers(self) -> dict:
+        now = int(time.time())
+        one = lambda sql, *a: self._one(sql, a)["n"]            # noqa: E731
+        tok = self._one("SELECT COALESCE(SUM(tokens_in),0) i, COALESCE(SUM(tokens_out),0) o, COALESCE(SUM(msgs),0) m FROM users")
+        return {"active24": one("SELECT COUNT(*) n FROM users WHERE last_seen>?", now - 86400),
+                "active7": one("SELECT COUNT(*) n FROM users WHERE last_seen>?", now - 7 * 86400),
+                "new7": one("SELECT COUNT(*) n FROM users WHERE created_at>?", now - 7 * 86400),
+                "tokens_in": tok["i"], "tokens_out": tok["o"], "msgs_total": tok["m"],
+                "groups": self.count_chats()}
+
+    def user_daily(self, uid: int, days: int = 14) -> list:
+        days = max(1, min(int(days), 35))
+        got = {r["day"]: r["n"] for r in self._all("SELECT day, n FROM daily WHERE user_id=? AND day>=date('now', ?)", (uid, f"-{days - 1} day"))}
+        return [(d, got.get(d, 0)) for d in (time.strftime("%Y-%m-%d", time.gmtime(time.time() - i * 86400)) for i in range(days - 1, -1, -1))]
+
+    def user_audit(self, uid: int, limit: int = 15) -> list:
+        return [dict(r) for r in self._all(
+            "SELECT ts, user_id, action, detail FROM audit WHERE user_id=? OR detail LIKE ? ORDER BY id DESC LIMIT ?", (uid, f"{uid}:%", limit))]
+
+    def db_size(self) -> int:
+        try:
+            return Path(self._path).stat().st_size if self._path != ":memory:" else 0
+        except OSError:
+            return 0
 
     # ---- backup
     def backup_bytes(self) -> bytes:

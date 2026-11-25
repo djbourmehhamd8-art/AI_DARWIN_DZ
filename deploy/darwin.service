@@ -32,6 +32,17 @@ RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
 SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+TasksMax=256
 
 [Install]
 WantedBy=multi-user.target

@@ -14,9 +14,11 @@ import urllib.parse
 
 import requests
 
+from . import USER_AGENT
+
 log = logging.getLogger("bot.web")
 
-UA = "Mozilla/5.0 (compatible; DarwinBot/3.7; +security-assistant)"
+UA = f"Mozilla/5.0 (compatible; {USER_AGENT}; +security-assistant)"
 MAX_PAGE_BYTES = 400_000
 MAX_REDIRECTS = 3
 
@@ -70,7 +72,7 @@ def parse_results(page: str, n: int = 5) -> list:
 
 
 BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-WIKI_UA = "DarwinBot/4.1 (Telegram security assistant; https://github.com) python-requests"
+WIKI_UA = f"{USER_AGENT} (Telegram security assistant; https://github.com) python-requests"
 CACHE_TTL = 600
 BREAKER_SECONDS = 300                       # a provider that blocked us is skipped for 5 minutes (keeps answers fast)
 LAST = {"provider": "", "diag": [], "ts": 0.0}          # what happened on the most recent search (shown in the admin panel)
@@ -204,6 +206,17 @@ def search(query: str, n: int = 5, timeout: float = 7, post=None, brave_key: str
 
 
 # ---------------------------------------------------------------------------------------- safe fetch
+_DENY_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "fec0::/10",         # deprecated site-local: still routed inside some networks, and is_global is True on some Python versions
+    "2002::/16",         # 6to4: embeds an arbitrary IPv4 address (may be 127.0.0.1 / 169.254.169.254)
+    "2001::/32",         # Teredo: same idea
+    "::ffff:0:0/96",     # IPv4-mapped: handled by the unwrapped check below, denied outright as defence in depth
+    "100.64.0.0/10",     # carrier-grade NAT
+    "198.18.0.0/15",     # benchmarking
+    "192.0.0.0/24", "192.88.99.0/24",
+))
+
+
 def resolve_public(host: str):
     """Return one public IP for `host`, or None if the name does not resolve or ANY answer is non-public."""
     try:
@@ -217,6 +230,8 @@ def resolve_public(host: str):
         except ValueError:
             return None
         if not ip.is_global or ip.is_multicast:                       # multicast counts as "global" in the stdlib: refuse it
+            return None
+        if any(ip in net for net in _DENY_NETS if net.version == ip.version):
             return None
         if ip.version == 6:                                            # IPv6 forms that smuggle an IPv4 address
             n = int(ip)
@@ -287,8 +302,11 @@ def fetch_text(url: str, limit: int = 3500, timeout: float = 8, get=None, resolv
     validated and the connection is pinned to the validated IP."""
     get = get or pinned_get
     resolve = resolve or resolve_public
+    deadline = time.monotonic() + max(15.0, timeout * 2)
     try:
         for _ in range(MAX_REDIRECTS + 1):
+            if time.monotonic() > deadline:
+                return ""
             p = urllib.parse.urlparse(url)
             if p.scheme not in ("http", "https") or not p.hostname or p.username or p.password \
                     or p.port not in (None, 80, 443):
@@ -307,7 +325,7 @@ def fetch_text(url: str, limit: int = 3500, timeout: float = 8, get=None, resolv
                 buf = bytearray()
                 for chunk in r.iter_content(32768):
                     buf += chunk
-                    if len(buf) > MAX_PAGE_BYTES:
+                    if len(buf) > MAX_PAGE_BYTES or time.monotonic() > deadline:   # timeout= is per read: bound the total time too
                         break
                 body = bytes(buf).decode(r.encoding or "utf-8", errors="replace")
                 return html_to_text(body, limit) if "html" in ctype or "xml" in ctype else body[:limit]

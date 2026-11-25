@@ -60,7 +60,14 @@ class PureTools(unittest.TestCase):
                    "roll": "6", "uuid": "2", "genpass": "16",
                    "hash": "hello", "pass": "abc12345", "jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.x",
                    "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "decode": "aGVsbG8=", "ts": "1700000000",
-                   "ioc": "http://evil.com 1.2.3.4"}
+                   "ioc": "http://evil.com 1.2.3.4",
+                   "csp": "script-src 'self'", "cookie": "a=b; Secure", "secheaders": "X-Frame-Options: DENY",
+                   "subnet": "10.0.0.0/24", "cron": "* * * * *",
+                   "spf": "v=spf1 -all", "dmarc": "v=DMARC1; p=reject", "secrets": "x=1", "sri": "a", "chmod": "755",
+                   "cidrmatch": "1.1.1.1 in 1.0.0.0/8", "ipconv": "1.1.1.1", "useragent": "curl/8.0", "diff": "a\n---\nb", "date": "2026-01-01",
+                   # v5.4.0 (bot/moretools.py)
+                   "entropy": "Zk3$9qLx!pW2vN7e", "homoglyph": "example.com", "urlparse": "https://example.com/a?b=1", "base": "255",
+                   "totp": "JBSWY3DPEHPK3PXP", "port": "443", "httpstatus": "404", "hmac": "k :: m", "hexdump": "hi"}
         self.assertEqual(set(samples), {k for k, _ in WEB_TOOLS})
         for k, v in samples.items():
             self.assertTrue(run_web_tool(k, v), k)
@@ -76,8 +83,10 @@ class BotButtons(Harness):
     def test_main_menu_has_new_buttons(self):
         self.app.on_message(message(1, "/menu"))
         btns = self.buttons()
-        self.assertIn("m:utils", btns)
-        self.assertIn("m:wc", btns)
+        self.assertIn("h:home", btns)                      # the hub replaced the flat tool buttons on the main menu
+        self.app.on_callback(cb(1, "h:home"))
+        for b in ("m:tools", "m:utils", "m:wc", "m:toolkit"):
+            self.assertIn(b, self.buttons())
 
     def test_utils_menu_lists_every_tool(self):
         self.app.on_callback(cb(1, "m:utils"))
@@ -101,15 +110,15 @@ class BotButtons(Harness):
 
     def test_webchat_button_url_only_for_admin(self):
         import dataclasses
-        self.app.cfg = dataclasses.replace(self.app.cfg, web_panel_url="https://panel.example.org")
+        self.app.cfg = dataclasses.replace(self.app.cfg, web_chat_port=8090, web_chat_url="https://chat.example.org", web_chat_public=True)
         self.app.on_callback(cb(1, "m:wc"))
         urls = [b.get("url") for p in self.calls("sendMessage", "editMessageText")
                 for row in (p.get("reply_markup") or {}).get("inline_keyboard", []) for b in row]
-        self.assertIn("https://panel.example.org/chat", urls)
+        self.assertIn("https://chat.example.org", urls)
 
     def test_webchat_without_panel_explains(self):
         self.app.on_message(message(1, "/webchat"))
-        self.assertIn("WEB_PANEL", self.texts())
+        self.assertIn("WEB_CHAT_PORT", self.texts())
 
 
 class WebPages(PanelBase):
@@ -117,62 +126,22 @@ class WebPages(PanelBase):
         return self.req("GET", path, cookie=cookie)
 
     def test_pages_need_login(self):
-        for path in ("/chat", "/tools", "/audit", "/system"):
+        for path in ("/tools", "/audit", "/system"):
             self.assertEqual(self.req("GET", path)[0], 303, path)
-        for path in ("/chat/send", "/chat/clear", "/tools/run"):
+        for path in ("/tools/run",):
             self.assertEqual(self.req("POST", path, {"msg": "x"})[0], 403, path)
 
     def test_nav_and_pages_render(self):
         c = self.login()
-        for path in ("/", "/chat", "/tools", "/audit", "/system"):
+        for path in ("/", "/tools", "/audit", "/system"):
             st, _, body = self.get(c, path)
             self.assertEqual(st, 200, path)
-            self.assertIn('href="/chat"', body)
+            self.assertNotIn('href="/chat"', body)             # the AI chat is its own website now
         self.assertIn("حالة النظام", self.get(c, "/system")[2])
 
-    def test_chat_round_trip_and_clear(self):
-        c = self.login()
-        csrf = self.csrf(c)
-        with mock.patch.object(self.app.ai, "chat", return_value=("مرحباً <b>بك</b>", {"prompt_tokens": 3, "completion_tokens": 2})) as m:
-            st, hd, _ = self.req("POST", "/chat/send", {"csrf": csrf, "persona": "soc", "msg": "hello <i>there</i>"}, cookie=c)
-        self.assertEqual((st, hd["Location"]), (303, "/chat"))
-        sent = m.call_args[0][0]
-        self.assertEqual(sent[0]["role"], "system")
-        self.assertIn("SOC", sent[0]["content"])
-        self.assertFalse(m.call_args[1].get("stream", True))
-        page = self.get(c, "/chat")[2]
-        self.assertIn("&lt;i&gt;there&lt;/i&gt;", page)                      # user text escaped
-        self.assertIn("&lt;b&gt;بك&lt;/b&gt;", page)                         # model text escaped
-        self.assertNotIn("<i>there</i>", page)
-        self.req("POST", "/chat/clear", {"csrf": csrf}, cookie=c)
-        self.assertNotIn("hello", self.get(c, "/chat")[2])
 
-    def test_chat_history_is_sent_and_capped(self):
-        c = self.login()
-        csrf = self.csrf(c)
-        with mock.patch.object(self.app.ai, "chat", return_value=("ok", {})) as m:
-            for i in range(3):
-                self.req("POST", "/chat/send", {"csrf": csrf, "persona": "default", "msg": f"q{i}"}, cookie=c)
-        roles = [x["role"] for x in m.call_args[0][0]]
-        self.assertEqual(roles, ["system", "user", "assistant", "user", "assistant", "user"])
 
-    def test_chat_error_is_shown_and_not_stored(self):
-        c = self.login()
-        csrf = self.csrf(c)
-        with mock.patch.object(self.app.ai, "chat", side_effect=APIError(401, "revoked")):
-            self.req("POST", "/chat/send", {"csrf": csrf, "persona": "default", "msg": "hi"}, cookie=c)
-        page = self.get(c, "/chat")[2]
-        self.assertIn('class="flash"', page)
-        self.assertNotIn("DARWIN DZ</b><div", page)                         # no assistant bubble
 
-    def test_chat_rate_limit_and_unknown_persona(self):
-        c = self.login()
-        csrf = self.csrf(c)
-        with mock.patch.object(self.app.ai, "chat", return_value=("ok", {})) as m:
-            for i in range(14):
-                self.req("POST", "/chat/send", {"csrf": csrf, "persona": "../../etc", "msg": f"m{i}"}, cookie=c)
-        self.assertEqual(m.call_count, 12)
-        self.assertIn("DARWIN", m.call_args[0][0][0]["content"])           # fell back to the default persona
 
     def test_tools_run(self):
         c = self.login()
@@ -191,13 +160,6 @@ class WebPages(PanelBase):
         self.assertNotIn("<script>x</script>", body)
         self.assertIn("&lt;script&gt;", body)
 
-    def test_large_arabic_chat_message_accepted(self):
-        c = self.login()
-        csrf = self.csrf(c)
-        with mock.patch.object(self.app.ai, "chat", return_value=("ok", {})) as m:
-            st, _, _ = self.req("POST", "/chat/send", {"csrf": csrf, "persona": "default", "msg": "س" * 3900}, cookie=c)
-        self.assertEqual(st, 303)
-        self.assertEqual(len(m.call_args[0][0][-1]["content"]), 3900)
 
 
 if __name__ == "__main__":

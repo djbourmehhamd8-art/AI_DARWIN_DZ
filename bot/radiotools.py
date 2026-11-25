@@ -197,6 +197,8 @@ QCODES = {
 
 # ------------------------------------------------------------------------------------------ Maidenhead locator
 def to_grid(lat: float, lon: float, pairs: int = 3) -> str:
+    lon = min(max(lon, -180.0), 180.0 - 1e-9)                       # 180E / 90N would give the invalid field letter "S"
+    lat = min(max(lat, -90.0), 90.0 - 1e-9)
     lon, lat = lon + 180.0, lat + 90.0
     loc = chr(ord("A") + int(lon // 20)) + chr(ord("A") + int(lat // 10))
     lon, lat = lon % 20, lat % 10

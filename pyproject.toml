@@ -1,0 +1,18 @@
+[project]
+name = "darwin-dz"
+description = "DARWIN DZ — cybersecurity Telegram bot with 60+ offline tools, AI assistant and web panel"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["requests>=2.32.4"]
+dynamic = ["version"]
+
+[tool.setuptools.dynamic]
+version = { attr = "bot.__version__" }
+
+[tool.ruff]
+line-length = 160
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E9", "F", "B006", "B008", "S102", "S307"]   # real bugs only: syntax errors, undefined names, unused imports, mutable defaults, eval/exec
+ignore = ["F401"]                                        # re-exports for older imports are intentional

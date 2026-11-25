@@ -5,6 +5,7 @@ import html
 import re
 import time
 
+from .hardening import trim_times
 from .ui import kb, tr
 
 REQ_COOLDOWN = 24 * 3600            # one access request per user per day
@@ -242,6 +243,7 @@ class AccessMixin:
         now = time.time()
         if now - self._welcomed.get(cid, 0) < 60:                      # my_chat_member + service message both fire
             return
+        trim_times(self._welcomed, 2000)
         self._welcomed[cid] = now
         row = self.db.upsert_chat(cid, chat.get("title") or "")
         by_staff = bool(actor and actor.get("id") and (self.is_staff(actor["id"]) or self.allowed(self._user(actor))))
@@ -258,6 +260,7 @@ class AccessMixin:
         cid = row["id"]
         if time.time() - self._staff_pinged.get(cid, 0) < STAFF_NOTIFY_EVERY:
             return
+        trim_times(self._staff_pinged, 2000)
         self._staff_pinged[cid] = time.time()
         who = ""
         if actor:
@@ -291,6 +294,7 @@ class AccessMixin:
             return True
         now = time.time()
         if now - self._group_notice.get(chat_id, 0) >= GROUP_NOTICE_EVERY:
+            trim_times(self._group_notice, 2000)
             self._group_notice[chat_id] = now
             t = (f"🔒 هذه المجموعة غير مفعّلة بعد. تم إبلاغ المطوّر @{_e(self.cfg.contact)}.\n"
                  f"🔒 This group is not activated yet. The developer @{_e(self.cfg.contact)} has been notified.")

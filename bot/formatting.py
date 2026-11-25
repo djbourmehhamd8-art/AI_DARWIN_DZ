@@ -63,6 +63,7 @@ def _strip_md(s: str) -> str:
 def _inline(s: str) -> str:
     """Inline Markdown of one line -> HTML. Code spans are protected from every other rule."""
     codes: list = []
+    s = s.replace("\x00", "")                               # NUL is our placeholder marker: text that already contains "\x005\x00" must not forge one (IndexError)
 
     def stash(m):
         codes.append(m.group(1))

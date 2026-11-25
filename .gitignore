@@ -1,23 +1,46 @@
-# secrets and runtime data: NEVER commit these
+# Secrets
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime
+*.log
+logs/
+*.pid
+*.lock
+
+# Sensitive runtime data
 data/*
 !data/.gitkeep
-*.db
-*.db-wal
-*.db-shm
-*.log
+!data/README.md
 
-# python / tooling
-__pycache__/
-*.pyc
-venv/
-.venv/
-.idea/
+# Backups
+backups/
+*.bak
+*.old
+*.backup
+
+# Editors
 .vscode/
-.pytest_cache/
+.idea/
+*.swp
 
-# build artefacts
-*.zip
-*.tar.gz
+# OS
+.DS_Store
+Thumbs.db

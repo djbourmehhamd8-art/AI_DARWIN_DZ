@@ -20,11 +20,27 @@ jobs:
           cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       - name: Compile
-        run: python -m compileall -q bot main.py tests
+        run: python -m compileall -q bot main.py tests scripts
+      - name: Lint (ruff, real bugs only)
+        if: matrix.python-version == '3.12'
+        run: pip install ruff && ruff check bot main.py scripts tests
       - name: Shell scripts parse
         run: for f in deploy/*.sh install_termux.sh start.sh stop.sh; do bash -n "$f"; done
       - name: Unit tests
         run: python -m unittest discover -s tests -t .
+      - name: Fuzz smoke (hostile input)
+        run: python scripts/fuzz.py --quick
+      - name: Build and verify clean release archive
+        run: |
+          python scripts/build_release.py --output /tmp/darwin-release.zip
+          python - <<'PY'
+          import zipfile
+          z = zipfile.ZipFile('/tmp/darwin-release.zip')
+          names = z.namelist()
+          assert 'darwin_dz/RELEASE-MANIFEST.json' in names
+          assert not any(n.endswith('/.env') or ('/.env.' in n and not n.endswith('/.env.example')) or n.endswith(('.db', '.sqlite', '.sqlite3', '.log', '.pyc')) for n in names)
+          assert not any('/data/' in n and not n.endswith('/data/.gitkeep') for n in names)
+          PY
 
   secrets:
     runs-on: ubuntu-latest

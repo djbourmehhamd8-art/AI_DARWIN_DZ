@@ -55,7 +55,7 @@ class WorkspaceMixin:
     """Expects BotApp: tg, db, cfg, ctx, home_row(), _oneshot(), _user(), is_admin() and a history key helper."""
 
     def workspace_commands(self) -> dict:
-        return {"case": self.cmd_case, "notes": self.cmd_notes, "save": self.cmd_save,
+        return {"case": self.cmd_case, "notes": self.cmd_notes,
                 "checklist": self.cmd_checklist, "report": self.cmd_report, "me": self.cmd_me}
 
     # ------------------------------------------------------------------ helpers
@@ -163,9 +163,6 @@ class WorkspaceMixin:
         self.tg.send_document(chat_id, f"case-{slug}.md", "\n".join(out).encode("utf-8"))
 
     # ------------------------------------------------------------------ notes library
-    def cmd_save(self, chat_id, user, args):
-        self.save_last_answer(chat_id, user)
-
     def save_last_answer(self, chat_id, user) -> None:
         lang = user["lang"]
         last = self.db.last_assistant(self._hk(chat_id, user))

@@ -32,6 +32,7 @@ def serve(host: str, port: int, problems: list, stop: threading.Event) -> None:
     class H(BaseHTTPRequestHandler):
         server_version = "DZ"
         sys_version = ""
+        timeout = 15                                        # an idle or slow client must not hold a thread forever
 
         def log_message(self, *a):
             pass
@@ -45,7 +46,8 @@ def serve(host: str, port: int, problems: list, stop: threading.Event) -> None:
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(data)
+            if self.command != "HEAD":                      # HEAD answers with headers only
+                self.wfile.write(data)
 
         do_HEAD = do_GET
 

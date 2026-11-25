@@ -203,7 +203,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertTrue(toasts)
 
     def test_admin_diagnostics_button(self):
-        user = self.app._user({"id": 1, "first_name": "Admin"})
+        self.app._user({"id": 1, "first_name": "Admin"})
         self.app.on_callback(cb(1, "adm:diag"))
         sent = [p.get("text", "") for m, p in ti.CALLS if m == "sendMessage"]
         self.assertTrue(any("SQLite: ✅ ok" in value for value in sent))

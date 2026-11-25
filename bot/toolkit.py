@@ -161,7 +161,7 @@ def search(query: str, limit: int = 8) -> list:
     if not words:
         return []
     scored = []
-    for key, (icon, ar, en, tools) in CATALOG.items():
+    for key, (_icon, ar, en, tools) in CATALOG.items():
         for t in tools:
             hay = f"{t[0]} {t[1]} {t[2]} {ar} {en} {key}".lower()
             score = sum(3 if w in t[0].lower() else 1 for w in words if w in hay)

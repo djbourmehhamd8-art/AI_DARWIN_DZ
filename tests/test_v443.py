@@ -105,7 +105,7 @@ class WebPanelHardeningTest(unittest.TestCase):
         sid = r.getheader("Set-Cookie").split(";")[0].split("=")[1]
         html = self.panel.dashboard(self.panel.sessions[sid], {"p": "9"}).decode()
         self.assertIn("صفحة 2 من 2", html)
-        self.assertGreater(html.count("<tr><td><code>"), 0)
+        self.assertGreater(html.count('<td><a href="/user?id='), 0)
 
     def test_handler_has_socket_timeout(self):
         self.assertTrue(0 < _Handler.timeout <= 60)

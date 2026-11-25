@@ -14,9 +14,11 @@ from bot.ai_client import AIClient
 from bot.config import Config, load_env
 from bot.handlers import BotApp
 from bot.logsafe import RedactFilter
+from bot.ringlog import RING
 from bot.preflight import harden_data_permissions, render, run_preflight
 from bot.storage import Storage
 from bot.telegram import TelegramAPI
+from bot.webchat import ChatSite
 from bot.webpanel import WebPanel
 
 
@@ -35,6 +37,8 @@ def setup_logging(cfg: Config) -> None:
     flt = RedactFilter([cfg.telegram_token, *cfg.all_keys()])
     sh.addFilter(flt)
     fh.addFilter(flt)
+    RING.addFilter(flt)
+    root.addHandler(RING)                            # recent warnings/errors for the web panel (/logs)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
@@ -78,6 +82,10 @@ def main() -> int:
     harden_data_permissions(cfg)
     _warn_env_permissions()
     logging.getLogger("bot").info("DARWIN DZ v%s", __version__)
+    raw_panel_token = os.environ.get("WEB_PANEL_TOKEN", "").strip()
+    if raw_panel_token and len(raw_panel_token) < 12:   # from_env() ignores it and derives a strong one: say so instead of a silent login failure
+        logging.getLogger("bot").warning("WEB_PANEL_TOKEN is shorter than 12 characters and is IGNORED; the panel password is the derived one "
+                                         "(send /web to the bot as an admin). Use 12+ characters to set your own.")
     if cfg.web_panel_port:
         logging.getLogger("bot").info("Web panel on port %s. Admins: send /web to the bot for the address and password.", cfg.web_panel_port)
         if not cfg.admin_ids:                        # nobody can run /web yet: show the password once, on the owner's console only
@@ -102,6 +110,14 @@ def main() -> int:
         except OSError as e:                         # port busy etc.: the bot itself must still start
             logging.getLogger("bot").error("Web panel could not start on %s:%s: %s", cfg.web_panel_host, cfg.web_panel_port, e)
             panel = None
+    chat_site = None
+    if cfg.web_chat_port:                            # standalone AI chat website (own port, own password), independent of the panel
+        try:
+            chat_site = ChatSite(app)
+            chat_site.start()
+        except OSError as e:
+            logging.getLogger("bot").error("Web chat could not start on %s:%s: %s", cfg.web_chat_host, cfg.web_chat_port, e)
+            chat_site = None
     try:
         app.run()
     except RuntimeError as e:
@@ -111,6 +127,8 @@ def main() -> int:
         # Close every persistent HTTP/SQLite resource on normal shutdown and startup failure.
         if panel:
             panel.stop()
+        if chat_site:
+            chat_site.stop()
         ai.close()
         tg.close()
         db.close()

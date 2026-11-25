@@ -12,7 +12,7 @@ from pathlib import Path
 from .ai_client import AIClient, APIError
 from .config import Config
 from .brand import CORE_PROMPT, DETAIL_PROMPTS
-from .hardening import SAFETY_TAIL, KeyedLocks, PendingStore
+from .hardening import SAFETY_TAIL, KeyedLocks, PendingStore, trim_times
 from .i18n import t
 from .personas import PERSONAS, SUMMARY_SYSTEM, TRANSLATOR_PROMPT
 from .render import StreamRenderer, Typing
@@ -24,14 +24,17 @@ from .chatstyle import clean_name
 from .admin_panel import AdminPanelMixin
 from .toolbox import ToolboxMixin
 from .worldtools import WorldToolsMixin
+from .extra_cmds import ExtraCmdsMixin
+from .hub import HUB_KINDS, HubMixin
 from .proext import ProExtMixin
+from .reports import ReportsMixin
 from .security_cmds import REPLY_ARG_CMDS, SecurityCommands
 from .storage import Storage
 from .telegram import TelegramAPI
 from . import files as F
 from .web_files import WebFilesMixin
 from .workspace import WorkspaceMixin
-from .ui import UIMixin, kb  # noqa: F401  (kb is re-exported for older imports)
+from .ui import LOCAL_INPUT_MAX, LOCAL_KINDS, UIMixin, kb  # noqa: F401  (kb is re-exported for older imports)
 from .utils import RateLimiter, est_tokens, fmt_duration, parse_duration, safe_int
 
 log = logging.getLogger("bot.app")
@@ -48,11 +51,11 @@ MAX_ZIP_KB = 3000
 TEMPS = [0.2, 0.5, 0.7, 1.0, 1.3]
 
 COMMANDS_AR = [("menu", "القائمة الرئيسية"), ("case", "القضايا (مساحات عمل)"), ("notes", "مكتبتي (ملاحظات)"),
-               ("search", "بحث في الويب"), ("files", "تصدير ملفات / ZIP"), ("new", "محادثة جديدة"), ("stop", "إيقاف الرد"), ("help", "المساعدة")]
+               ("tools", "مركز الأدوات"), ("search", "بحث في الويب"), ("new", "محادثة جديدة"), ("stop", "إيقاف الرد"), ("help", "المساعدة")]
 COMMANDS_GROUP_AR = [("help", "المساعدة"), ("search", "بحث في الويب"), ("id", "معرّفك")]
 COMMANDS_GROUP_EN = [("help", "Help"), ("search", "Web search"), ("id", "Your ID")]
 COMMANDS_EN = [("menu", "Main menu"), ("case", "Cases (workspaces)"), ("notes", "My library (notes)"),
-               ("search", "Web search"), ("files", "Export files / ZIP"), ("new", "New conversation"), ("stop", "Stop reply"), ("help", "Help")]
+               ("tools", "Tools hub"), ("search", "Web search"), ("new", "New conversation"), ("stop", "Stop reply"), ("help", "Help")]
 # Older slash commands (/url, /ioc, /remind ...) still work as hidden shortcuts; they are just not advertised.
 
 
@@ -73,10 +76,11 @@ class Cancelled(Exception):
     """Raised inside the stream callback when the user sends /stop."""
 
 
-class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin, AdvToolsMixin, WorldToolsMixin, ProExtMixin, SecurityCommands, WorkspaceMixin):
+class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin, AdvToolsMixin, WorldToolsMixin, ProExtMixin, ExtraCmdsMixin, HubMixin, ReportsMixin, SecurityCommands, WorkspaceMixin):
     def __init__(self, cfg: Config, tg: TelegramAPI, ai: AIClient, db: Storage):
         self.cfg, self.tg, self.ai, self.db = cfg, tg, ai, db
         self.pool = ThreadPoolExecutor(max_workers=cfg.workers, thread_name_prefix="worker")
+        self._slots = threading.BoundedSemaphore(max(cfg.workers * 8, 32))   # back-pressure: at most this many updates queued or running
         self.locks = KeyedLocks()                      # one in-flight answer per chat (bounded memory)
         self.pending = PendingStore()                  # chat/user -> what the last button press is waiting for
         self.dm_target = {}                            # admin id -> user id awaiting a direct message
@@ -117,6 +121,9 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         self.commands.update(self.adv_commands())
         self.commands.update(self.world_commands())
         self.commands.update(self.proext_commands())
+        self.commands.update(self.hub_commands())
+        self.commands.update(self.report_commands())
+        self.report_reply_target: dict = {}                       # admin id -> report id while the admin types a reply
         self.commands.update({"groupusage": self.cmd_groupusage, "panel": self.cmd_panel})
         self.admin_commands = {
             "stats": self.adm_stats, "users": self.adm_users, "broadcast": self.adm_broadcast,
@@ -125,6 +132,7 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
             "status": self.adm_status, "keys": self.adm_keys, "diag": self.adm_diag,
             "find": self.adm_find, "osint": self.adm_osint, "web": self.adm_web, "report": self.adm_report, "websearch": self.adm_websearch, "dm": self.adm_dm_send, "dmq": self.adm_dm_pending,
         }
+        self.admin_commands.update(self.report_admin_commands())
 
     # ------------------------------------------------------------------ lifecycle
     def setup(self) -> None:
@@ -179,7 +187,10 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
             self.tg_state = ("ok", "")
             for upd in updates:
                 offset = upd["update_id"] + 1
-                self.pool.submit(self._safe, upd)
+                if not self._take_slot():                    # queue full for a long time: shed this update instead of growing memory forever
+                    log.warning("update %s dropped: worker queue is saturated", upd.get("update_id"))
+                    continue
+                self.pool.submit(self._run_update, upd)
         log.info("Shutting down…")
         self.pool.shutdown(wait=True, cancel_futures=False)
 
@@ -228,6 +239,22 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
                 "Stop the other copy (Termux / old server / second deployment) or rotate the token in @BotFather (/revoke).")
         for aid in self.cfg.admin_ids:
             self.tg.send_message(aid, text)
+
+    def _take_slot(self) -> bool:
+        """Wait (politely, so Telegram keeps the backlog for us) until a worker slot frees up; give up after 60 s."""
+        deadline = time.monotonic() + 60
+        while not self.stop.is_set():
+            if self._slots.acquire(timeout=1):
+                return True
+            if time.monotonic() > deadline:
+                return False
+        return False
+
+    def _run_update(self, upd) -> None:
+        try:
+            self._safe(upd)
+        finally:
+            self._slots.release()
 
     def _safe(self, upd) -> None:
         try:
@@ -312,7 +339,9 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
             if not args and cmd in REPLY_ARG_CMDS:
                 args = self._replied_text(msg)
             if cmd in self.commands:
-                self.commands[cmd](chat_id, user, args)
+                if cmd in HUB_KINDS:
+                    self.note_tool(uid, cmd)
+                self.commands[cmd](chat_id, user, args[:LOCAL_INPUT_MAX] if cmd in LOCAL_KINDS else args)
                 return
             if cmd in self.admin_commands:
                 if not self.is_admin(uid):
@@ -377,6 +406,9 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
 
     def _deny(self, chat_id, user, is_group) -> None:
         uid = user["id"]
+        if len(self._denied_seen) > 20000:              # bounded: an account farm must not grow memory forever
+            self._denied_seen.clear()
+        trim_times(self._denied_shown)
         if uid not in self._denied_seen:                # audit once per user per run, avoids log flooding
             self._denied_seen.add(uid)
             self.db.add_audit(uid, "denied", f"@{user.get('username') or '-'}")
@@ -637,9 +669,9 @@ class BotApp(UIMixin, AdminPanelMixin, AccessMixin, WebFilesMixin, ToolboxMixin,
         text = t(user["lang"], "help") + tr_(
             user["lang"],
             "\n\n🔎 <b>بحث الويب</b>: /search سؤال · /web للتحكم (إيقاف / تلقائي / دائماً)\n"
-            "📁 <b>الملفات</b>: زر «ملفات» تحت أي إجابة أو /files · /zip مشروع كامل · /save app.py نص\n📦 أرسل لي ملف ZIP لمشروعك وسأراجعه كاملاً.\n🧰 أدوات جديدة: /hex · /caesar · /entropy\n🧮 أدوات إضافية: /calc · /unit · /pct · /json · /regex · /textstat · /uniq · /urlenc · /color · /caseconv · /slug · /roll · /uuid · 🌐 /webchat\n🌐 فحص النطاقات: /domain · /dns · /whois · /cert · /webhead · 👣 /footprint\n📚 دليل الأدوات والتوزيعات: /toolkit · /tool حاجتك · ✅ /verify لتدقيق آخر إجابة\n🌍 العالم المباشر: /world · ✈️ /radar مدينة · /flight · /plane · 🚨 /squawk · /metar · /weather · /iss · /space · /quakes · 📻 /radio · /freq · /morse · /rf\n🧬 /subdomains · /asn · /rdns · /mac · /exposure · 🧭 /portals\n💬 أرسل رابطاً أو هاشاً أو CVE أو IP وحده فأحلّله مباشرة (/smart للتحكم)\n👥 في المجموعات: اكتب DZ ثم سؤالك.",
+            "📁 <b>الملفات</b>: زر «ملفات» تحت أي إجابة أو /files · /zip مشروع كامل · /save app.py نص\n📦 أرسل لي ملف ZIP لمشروعك وسأراجعه كاملاً.\n🧰 أدوات جديدة: /hex · /caesar · /entropy\n🧮 أدوات إضافية: /calc · /unit · /pct · /json · /regex · /textstat · /uniq · /urlenc · /color · /caseconv · /slug · /roll · /uuid · 🌐 /webchat\n🌐 فحص النطاقات: /domain · /dns · /whois · /cert · /webhead · 👣 /footprint\n📚 دليل الأدوات والتوزيعات: /toolkit · /tool حاجتك · ✅ /verify لتدقيق آخر إجابة\n🌍 العالم المباشر: /world · ✈️ /radar مدينة · /flight · /plane · 🚨 /squawk · /metar · /weather · /iss · /space · /quakes · 📻 /radio · /freq · /morse · /rf\n🧬 /subdomains · /asn · /rdns · /mac · /exposure · 🧭 /portals\n🐞 مشكلة أو اقتراح؟ /problem (وتابع بلاغاتك بـ /myreports)\n💬 أرسل رابطاً أو هاشاً أو CVE أو IP وحده فأحلّله مباشرة (/smart للتحكم)\n👥 في المجموعات: اكتب DZ ثم سؤالك.",
             "\n\n🔎 <b>Web search</b>: /search question · /web to control (off / auto / always)\n"
-            "📁 <b>Files</b>: the “Files” button under any answer or /files · /zip full project · /save app.py text\n📦 Send me a ZIP of your project and I will review all of it.\n🧰 New tools: /hex · /caesar · /entropy\n🧮 Extra tools: /calc · /unit · /pct · /json · /regex · /textstat · /uniq · /urlenc · /color · /caseconv · /slug · /roll · /uuid · 🌐 /webchat\n🌐 Domain checks: /domain · /dns · /whois · /cert · /webhead · 👣 /footprint\n📚 Tools & distros guide: /toolkit · /tool your need · ✅ /verify reviews the last answer\n🌍 Live world: /world · ✈️ /radar city · /flight · /plane · 🚨 /squawk · /metar · /weather · /iss · /space · /quakes · 📻 /radio · /freq · /morse · /rf\n🧬 /subdomains · /asn · /rdns · /mac · /exposure · 🧭 /portals\n💬 Send a lone link, hash, CVE or IP and I analyse it right away (/smart to control)\n👥 In groups: write DZ then your question.")
+            "📁 <b>Files</b>: the “Files” button under any answer or /files · /zip full project · /save app.py text\n📦 Send me a ZIP of your project and I will review all of it.\n🧰 New tools: /hex · /caesar · /entropy\n🧮 Extra tools: /calc · /unit · /pct · /json · /regex · /textstat · /uniq · /urlenc · /color · /caseconv · /slug · /roll · /uuid · 🌐 /webchat\n🌐 Domain checks: /domain · /dns · /whois · /cert · /webhead · 👣 /footprint\n📚 Tools & distros guide: /toolkit · /tool your need · ✅ /verify reviews the last answer\n🌍 Live world: /world · ✈️ /radar city · /flight · /plane · 🚨 /squawk · /metar · /weather · /iss · /space · /quakes · 📻 /radio · /freq · /morse · /rf\n🧬 /subdomains · /asn · /rdns · /mac · /exposure · 🧭 /portals\n🐞 Problem or idea? /problem (track yours with /myreports)\n💬 Send a lone link, hash, CVE or IP and I analyse it right away (/smart to control)\n👥 In groups: write DZ then your question.")
         if self.is_admin(user["id"]):
             text += t(user["lang"], "admin_help")
         self.tg.send_rich(chat_id, text, _untag(text), self.main_menu(user["lang"], self.is_staff(user["id"])))

@@ -18,14 +18,14 @@ from .utils import safe_int, split_text
 
 log = logging.getLogger("bot.sec")
 
-CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$", re.I)
 # commands whose argument may come from the message being replied to
 REPLY_ARG_CMDS = frozenset({"url", "ioc", "hash", "jwt", "headers", "b64", "decode", "cvss", "ip", "defang",
                             "cve", "analyze", "ir", "explain", "harden", "sigma", "port", "ts", "mitre", "hex", "caesar", "entropy",
                             "domain", "dns", "whois", "cert", "webhead", "footprint", "tool", "radar", "flight", "plane", "metar", "weather", "radio",
                             "freq", "wave", "morse", "phonetic", "grid", "power", "fspl", "horizon", "dist", "subdomains", "asn", "rdns",
                             "mac", "exposure", "calc", "unit", "pct", "json", "regex", "textstat", "uniq", "urlenc", "color", "caseconv",
-                            "slug", "roll", "uuid"})
+                            "slug", "roll", "uuid", "csp", "cookie", "secheaders", "subnet", "cron", "spf", "dmarc", "secrets", "sri", "chmod",
+                            "cidrmatch", "ipconv", "useragent", "diff", "date"})
 
 
 class SecurityCommands:
@@ -223,15 +223,6 @@ class SecurityCommands:
             return
         self._oneshot(chat_id, user, CORE_PROMPT, TASK_PROMPTS[task].format(x=args.strip()[:6000]),
                       temperature=0.3, remember=True)
-
-    def cmd_cve(self, chat_id, user, args):
-        if not self._need(chat_id, user, args, "sec_usage_cve"):
-            return
-        cve = args.strip().split()[0].upper()
-        if not CVE_RE.match(cve):
-            self.tg.send_message(chat_id, t(user["lang"], "sec_bad_cve"))
-            return
-        self._task(chat_id, user, "cve", cve, "sec_usage_cve")
 
     def cmd_mitre(self, chat_id, user, args):
         self._task(chat_id, user, "mitre", args, "sec_usage_mitre")

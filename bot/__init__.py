@@ -1,1 +1,2 @@
-__version__ = "4.6.0"
+__version__ = "5.4.1"
+USER_AGENT = f"DarwinBot/{__version__}"

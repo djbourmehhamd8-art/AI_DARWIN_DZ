@@ -12,13 +12,18 @@ import hmac
 import html
 import io
 import logging
+import re
 import secrets
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlsplit, urlencode
 
 from .admin_panel import _cell
+from .hardening import LimitedHTTPServer, cross_site
+from .webadmin import WebAdminMixin, safe_ret
+from .webctl import WebCtlMixin
+from .webui import UI_CSS
 from .webext import WebExtMixin
 
 log = logging.getLogger("bot.web")
@@ -39,6 +44,8 @@ SEC_HEADERS = {
                                "base-uri 'none'; frame-ancestors 'none'",
     "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store", "Cross-Origin-Resource-Policy": "same-origin",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()",
 }
 
 CSS = """
@@ -71,7 +78,13 @@ header .nav{margin:0;flex:1;justify-content:center}h2{font-size:17px;margin:4px 
 .msg.me{align-self:flex-start;background:var(--acc);border-color:var(--acc);color:#fff}.msg.ai{align-self:flex-end}
 .msg b{font-size:12px;opacity:.75;display:block;margin-bottom:2px}.txt{white-space:pre-wrap;word-break:break-word}
 .chatform{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}.chatform textarea{font:inherit;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:9px 12px;resize:vertical;min-height:90px}
-.row{display:flex;gap:8px;margin:6px 0}pre.out{white-space:pre-wrap;word-break:break-word;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;direction:ltr;text-align:left}
+.row{display:flex;gap:8px;margin:6px 0}.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-bottom:14px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:14px}.grid2 .card{margin-bottom:0}
+.card h3{margin:0 0 10px}.card table{width:100%}a.stat{text-decoration:none;color:inherit}a.stat:hover{border-color:var(--acc)}.stat.warn b{color:var(--warn)}.stat.bad b{color:var(--bad)}
+.chart{display:flex;gap:3px;align-items:flex-end;height:130px;padding-top:14px}.bc{flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%;position:relative;min-width:0}
+.bc i{display:block;background:var(--acc);border-radius:3px 3px 0 0;min-height:1px}.bc em{font-style:normal;font-size:10px;text-align:center;color:var(--mut);line-height:1.2}.bc s{font-size:10px;text-align:center;color:var(--mut);text-decoration:none;margin-top:2px}
+details.rep{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:8px}details.rep summary{padding:10px 14px;cursor:pointer;list-style:none}details.rep[open] summary{border-bottom:1px solid var(--line)}
+.repbody{padding:10px 14px}.reply{background:var(--bg);border-radius:8px;padding:8px 12px;margin:8px 0}.repbody textarea,main textarea{width:100%;font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 12px;min-height:80px;resize:vertical}
+pre.out{white-space:pre-wrap;word-break:break-word;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;direction:ltr;text-align:left}
 """
 
 
@@ -83,7 +96,7 @@ def _ts(ts) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "-"
 
 
-class WebPanel(WebExtMixin):
+class WebPanel(WebAdminMixin, WebExtMixin, WebCtlMixin):
     """Owns the logic (apply / rows / csv / pages) and the HTTP server; the logic is testable without a socket."""
 
     def __init__(self, app):
@@ -99,7 +112,7 @@ class WebPanel(WebExtMixin):
     def start(self) -> None:
         panel = self
         handler = type("Handler", (_Handler,), {"panel": panel})
-        self.server = ThreadingHTTPServer((self.cfg.web_panel_host, self.cfg.web_panel_port), handler)
+        self.server = LimitedHTTPServer((self.cfg.web_panel_host, self.cfg.web_panel_port), handler)
         self.server.daemon_threads = True
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.1}, name="web-panel", daemon=True)
         self.thread.start()
@@ -166,8 +179,9 @@ class WebPanel(WebExtMixin):
 
     def host_ok(self, host_header: str) -> bool:
         """Blocks DNS-rebinding: while the panel is bound to loopback only local host names are accepted."""
-        if self.cfg.web_panel_host not in ("127.0.0.1", "::1", "localhost"):
-            return True
+        loopback_bind = self.cfg.web_panel_host in ("127.0.0.1", "::1", "localhost")
+        if not loopback_bind and not self.cfg.web_panel_hostnames():
+            return True                                      # exposed with no allow-list configured: nothing to compare against
         h = (host_header or "").strip().lower()
         h = h.rsplit(":", 1)[0] if (h.count(":") == 1 or h.startswith("[") and "]:" in h) else h
         return h in LOOPBACK or h in self.cfg.web_panel_hostnames() or (host_header or "").strip().lower() in self.cfg.web_panel_hostnames()
@@ -222,7 +236,6 @@ class WebPanel(WebExtMixin):
 
     # ================================================================== data helpers
     def status_of(self, u: dict) -> tuple:
-        now = time.time()
         if u["banned"]:
             return "محظور", "bad"
         if u.get("role") == "mod":
@@ -271,9 +284,10 @@ class WebPanel(WebExtMixin):
 
     # ================================================================== pages
     def page(self, body: str, title: str = "DARWIN DZ") -> bytes:
+        cls = ' class="app"' if 'class="side"' in body else ""
         return (f'<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'
                 f'<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">'
-                f'<title>{_e(title)}</title><style>{CSS}</style></head><body>{body}</body></html>').encode("utf-8")
+                f'<title>{_e(title)}</title><style>{CSS}{UI_CSS}</style></head><body{cls}>{body}</body></html>').encode("utf-8")
 
     def login_page(self, error: str = "") -> bytes:
         """Public home page: what the bot is, a link to the bot, the free tools, and the admin login box."""
@@ -296,7 +310,6 @@ class WebPanel(WebExtMixin):
             page = pages
             rows, total = self.db.search_users(flt, q, sort, desc, PAGE_SIZE, (page - 1) * PAGE_SIZE)
         csrf = sess["csrf"]
-        flash, sess["flash"] = sess.get("flash") or "", ""
 
         def link(**kw):
             base = {"f": flt, "q": q, "s": sort, "o": "d" if desc else "a", "p": page}
@@ -337,18 +350,25 @@ class WebPanel(WebExtMixin):
                         + (btn("da", "⛔ سحب") if u["allowed"] else "")
                         + f'<select name="value">{lim_opts}</select>' + btn("lim", "📊 حد") + '</form>')
             uname = f'@{_e(u["username"])}' if u.get("username") else '<span class="mut">-</span>'
-            trs.append(f'<tr><td><code>{u["id"]}</code></td><td>{_e((u.get("first_name") or "-")[:40])}</td><td>{uname}</td>'
+            chk = '<span class="mut">·</span>' if locked else f'<input type="checkbox" name="ids" value="{u["id"]}" form="bulk" aria-label="تحديد {u["id"]}">'
+            trs.append(f'<tr><td class="sel">{chk}</td><td><a href="/user?id={u["id"]}"><code>{u["id"]}</code></a></td><td>{_e((u.get("first_name") or "-")[:40])}</td><td>{uname}</td>'
                        f'<td><span class="b {cls}">{_e(st)}</span></td><td{over}>{_e(used)}</td><td>{u["msgs"]}</td>'
                        f'<td>{_e(_ts(u["last_seen"]))}</td><td>{_e(_ts(u["created_at"]))}</td><td class="act">{acts}</td></tr>')
-        table = ('<div class="wrap"><table><thead><tr><th>المعرّف</th><th>الاسم</th><th>المستخدم</th><th>الحالة</th>'
+        table = ('<div class="wrap"><table style="min-width:980px"><thead><tr><th class="sel"></th><th>المعرّف</th><th>الاسم</th><th>المستخدم</th><th>الحالة</th>'
                  '<th>اليوم / الحد</th><th>الرسائل</th><th>آخر نشاط</th><th>انضم</th><th>إجراءات</th></tr></thead><tbody>'
-                 + ("".join(trs) or '<tr><td colspan="9" class="mut">لا يوجد مستخدمون مطابقون.</td></tr>') + '</tbody></table></div>')
-        pager = (f'<div class="pager">' + (f'<a href="{_e(link(p=page - 1))}">→ السابق</a>' if page > 1 else "")
+                 + ("".join(trs) or '<tr><td colspan="10" class="empty">🔍 لا يوجد مستخدمون مطابقون.</td></tr>') + '</tbody></table></div>')
+        pager = ('<div class="pager">' + (f'<a href="{_e(link(p=1))}">« الأولى</a><a href="{_e(link(p=page - 1))}">→ السابق</a>' if page > 1 else "")
                  + f'<span>صفحة {page} من {pages} · {total} مستخدم</span>'
-                 + (f'<a href="{_e(link(p=page + 1))}">التالي ←</a>' if page < pages else "") + '</div>')
-        flash_html = f'<div class="flash">{_e(flash)}</div>' if flash else ""
+                 + (f'<a href="{_e(link(p=page + 1))}">التالي ←</a><a href="{_e(link(p=pages))}">الأخيرة »</a>' if page < pages else "") + '</div>')
+        bulk_acts = (("ap", "✅ موافقة"), ("rj", "❌ رفض"), ("ban", "🚫 حظر"), ("ub", "♻️ فك الحظر"), ("da", "⛔ سحب الصلاحية"))
+        bulk = (f'<form id="bulk" class="bulk" method="post" action="/bulk">{self._hidden(csrf, back=back)}'
+                f'<b>إجراء جماعي</b><select name="act" aria-label="الإجراء">'
+                + "".join(f'<option value="{a}">{_e(t)}</option>' for a, t in bulk_acts)
+                + f'</select><label><input type="checkbox" name="scope" value="all"> كل نتائج الفلتر الحالي ({total}) بدل المحدَّدين</label>'
+                '<label><input type="checkbox" name="confirm" value="1"> أؤكد</label><button class="p">تنفيذ</button></form>') if rows else ""
+        flash_html = self._flash(sess)
         head = self.nav("users", csrf)
-        return self.page(f'{head}<main>{flash_html}<div class="stats">{stats}</div><div class="tabs">{tabs}</div>{bar}{table}{pager}</main>')
+        return self.page(f'{head}<main>{flash_html}<div class="stats">{stats}</div><div class="tabs">{tabs}</div>{bar}{table}{bulk}{pager}</main>')
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -366,7 +386,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        for k, v in {**SEC_HEADERS, **(headers or {})}.items():
+        extra = {"Strict-Transport-Security": "max-age=31536000"} if self._https() else {}
+        for k, v in {**SEC_HEADERS, **extra, **(headers or {})}.items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
@@ -382,9 +403,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return v
         return ""
 
+    def _https(self) -> bool:
+        return (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" or self.panel.cfg.web_panel_url.startswith("https://")
+
     def _set_cookie(self, sid: str, max_age: int) -> str:
-        https = (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" or self.panel.cfg.web_panel_url.startswith("https://")
-        secure = "; Secure" if https else ""
+        secure = "; Secure" if self._https() else ""
         return f"dz_sid={sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
 
     def _form(self) -> dict | None:
@@ -395,11 +418,25 @@ class _Handler(BaseHTTPRequestHandler):
         if n < 0 or n > MAX_BODY:
             return None
         raw = self.rfile.read(n).decode("utf-8", "replace")
-        return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True, max_num_fields=20).items()}
+        out = {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True, max_num_fields=520).items()}
+        if "ids" in out:                                   # bulk selection: every checked id, comma-joined
+            out["ids"] = ",".join(parse_qs(raw, keep_blank_values=True, max_num_fields=520).get("ids", []))
+        if len(out) > 40 and not out.get("ids"):
+            return None
+        return out
 
     def _guard(self) -> bool:
-        if not self.panel.host_ok(self.headers.get("Host", "")):
-            self._send(403, b"forbidden", "text/plain; charset=utf-8")
+        if self.headers.get("Transfer-Encoding") is not None:   # bodies are Content-Length only: a chunked body would stay unread on a keep-alive
+            self.close_connection = True                        # connection and a proxy/server length mismatch is how request smuggling works
+            self._send(501, b"transfer-encoding not supported", "text/plain; charset=utf-8", {"Connection": "close"})
+            return False
+        if not self.panel.host_ok(self.headers.get("Host", "")) and urlsplit(self.path).path != "/healthz":
+            self.close_connection = True                        # a POST body would stay unread on the keep-alive connection
+            self._send(403, b"forbidden", "text/plain; charset=utf-8", {"Connection": "close"})
+            return False
+        if self.command == "POST" and cross_site(self.headers):   # browsers flag requests started by another site: never legitimate here
+            self.close_connection = True
+            self._send(403, b"cross-site request refused", "text/plain; charset=utf-8", {"Connection": "close"})
             return False
         return True
 
@@ -433,14 +470,30 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.panel.login_page())
             if url.path == "/":
                 return self._send(200, self.panel.dashboard(sess, params))
-            if url.path == "/chat":
-                return self._send(200, self.panel.chat_page(sess))
             if url.path == "/tools":
                 return self._send(200, self.panel.tools_page(sess))
+            if url.path == "/overview":
+                return self._send(200, self.panel.overview_page(sess))
+            if url.path == "/reports":
+                return self._send(200, self.panel.reports_page(sess, params))
+            if url.path == "/reports.csv":
+                return self._send(200, self.panel.reports_csv(params), "text/csv; charset=utf-8",
+                                  {"Content-Disposition": 'attachment; filename="darwin_reports.csv"'})
+            if url.path == "/user":
+                return self._send(200, self.panel.user_page(sess, params))
             if url.path == "/audit":
-                return self._send(200, self.panel.audit_page(sess))
+                return self._send(200, self.panel.audit_page(sess, params))
+            if url.path == "/audit.csv":
+                return self._send(200, self.panel.audit_csv(params), "text/csv; charset=utf-8",
+                                  {"Content-Disposition": 'attachment; filename="darwin_audit.csv"'})
             if url.path == "/system":
                 return self._send(200, self.panel.system_page(sess))
+            if url.path == "/groups":
+                return self._send(200, self.panel.groups_page(sess, params))
+            if url.path == "/settings":
+                return self._send(200, self.panel.settings_page(sess))
+            if url.path == "/logs":
+                return self._send(200, self.panel.logs_page(sess, params))
             if url.path == "/export.csv":
                 return self._send(200, self.panel.export_csv(params), "text/csv; charset=utf-8",
                                   {"Content-Disposition": 'attachment; filename="darwin_users.csv"'})
@@ -479,23 +532,46 @@ class _Handler(BaseHTTPRequestHandler):
             if url.path == "/logout":
                 self.panel.end_session(sid)
                 return self._redirect("/", {"Set-Cookie": self._set_cookie("", 0)})
-            if url.path == "/chat/send":
-                err = self.panel.chat_send(sess, form.get("persona", ""), form.get("msg", ""))
-                sess["flash"] = err
-                return self._redirect("/chat")
-            if url.path == "/chat/clear":
-                sess["chat"] = []
-                return self._redirect("/chat")
             if url.path == "/tools/run":
                 self.panel.tools_run(sess, form.get("tool", ""), form.get("text", ""))
                 return self._redirect("/tools")
+            if url.path == "/reports/act":
+                sess["flash"] = self.panel.reports_act(form)
+                return self._redirect("/reports" + ("?" + form["back"] if re.fullmatch(r"[A-Za-z0-9_=&%.-]{1,200}", form.get("back", "")) else ""))
+            if url.path == "/bulk":
+                sess["flash"] = self.panel.bulk_act(form)
+                back = {k: v[0] for k, v in parse_qs(form.get("back", ""), max_num_fields=10).items()}
+                flt, sort, desc, q, page = self.panel.query(back)
+                qs = urlencode({k: v for k, v in (("f", flt), ("q", q), ("s", sort), ("o", "d" if desc else "a"), ("p", page)) if v})
+                return self._redirect("/?" + qs)
+            if url.path == "/groups/act":
+                sess["flash"] = self.panel.groups_act(form)
+                return self._redirect("/groups" + ("?p=" + form["p"] if form.get("p", "").isdigit() and form["p"] != "1" else ""))
+            if url.path == "/settings/save":
+                sess["flash"] = self.panel.settings_save(form)
+                return self._redirect("/settings")
+            if url.path == "/settings/broadcast":
+                sess["flash"] = self.panel.broadcast_start(form)
+                return self._redirect("/settings")
+            if url.path == "/settings/backup":
+                name, data = self.panel.backup_file()
+                return self._send(200, data, "application/octet-stream", {"Content-Disposition": f'attachment; filename="{name}"'})
+            if url.path == "/user/ctl":
+                sess["flash"] = self.panel.user_ctl(form)
+                return self._redirect(safe_ret(f"/user?id={form.get('uid', '')}") or "/")
+            if url.path == "/user/dm":
+                sess["flash"] = self.panel.user_dm(form)
+                return self._redirect(safe_ret(f"/user?id={form.get('uid', '')}") or "/")
             if url.path == "/act":
                 try:
                     tid = int(form.get("uid", ""))
                 except ValueError:
                     tid = 0
-                ok, msg = self.panel.apply(form.get("act", ""), tid, form.get("value", ""))
+                _ok, msg = self.panel.apply(form.get("act", ""), tid, form.get("value", ""))
                 sess["flash"] = msg
+                ret = safe_ret(form.get("ret", ""))
+                if ret:
+                    return self._redirect(ret)
                 back = {k: v[0] for k, v in parse_qs(form.get("back", ""), max_num_fields=10).items()}
                 flt, sort, desc, q, page = self.panel.query(back)
                 qs = urlencode({k: v for k, v in (("f", flt), ("q", q), ("s", sort), ("o", "d" if desc else "a"), ("p", page)) if v})

@@ -1,7 +1,7 @@
-"""Web panel extras: AI chat, offline tools, audit log and system status pages (mixin for WebPanel).
+"""Web panel extras: offline tools, audit log and system status pages (mixin for WebPanel).
 
 Same security model as the rest of the panel: token login, CSRF on every POST, no JavaScript, every value escaped.
-The chat history lives only in the logged-in session (memory), it is never written to the database.
+The AI chat is NOT here any more: it is its own website (bot/webchat.py).
 """
 from __future__ import annotations
 
@@ -9,21 +9,14 @@ import html
 import logging
 import time
 
+from . import moretools as MT
 from . import proutils as P
 from .utils import safe_int
-from .ai_client import APIError
-from .brand import CORE_PROMPT
-from .hardening import SAFETY_TAIL
-from .personas import PERSONAS
 from . import __version__
 
 log = logging.getLogger("bot.web")
 
-CHAT_MAX_MSGS = 24                  # messages kept in a web chat session
-CHAT_MAX_CHARS = 24000              # context size sent to the model
-CHAT_MAX_INPUT = 4000
 PUBLIC_RATE = 30                    # public tool runs per minute per IP
-CHAT_RATE = (12, 60)                # messages per window (seconds) per session
 
 WEB_TOOLS = (
     ("calc", "🧮 حاسبة"), ("unit", "📏 محوّل وحدات"), ("pct", "％ نسبة مئوية"), ("json", "🧾 منسّق JSON"),
@@ -34,7 +27,12 @@ WEB_TOOLS = (
     ("hash", "#️⃣ بصمات Hash (MD5/SHA…) + تعريف نوع hash"), ("pass", "🔐 قوة كلمة المرور (لا تُخزَّن)"),
     ("jwt", "🪪 فحص JWT (بلا تحقق من التوقيع)"), ("cvss", "📊 حاسبة CVSS 3.x (المتجه)"),
     ("decode", "🕵️ فك ترميز متعدد الطبقات"), ("ts", "🕒 محوّل الطوابع الزمنية"), ("ioc", "🎯 استخراج مؤشرات IOC"),
-)
+    ("csp", "🛡 فاحص CSP"), ("cookie", "🍪 فاحص Set-Cookie"), ("secheaders", "🧱 تقييم ترويسات الأمان"),
+    ("subnet", "🕸 حاسبة الشبكات الفرعية"), ("cron", "⏰ مفسّر Cron"),
+    ("spf", "📨 فاحص SPF"), ("dmarc", "📬 فاحص DMARC"), ("secrets", "🕵️ كاشف الأسرار المسرّبة"), ("sri", "🔒 هاش SRI"),
+    ("chmod", "🔑 حاسبة chmod"), ("cidrmatch", "🎯 هل IP ضمن نطاق؟ (IP in CIDR)"), ("ipconv", "🔁 تحويل IP"),
+    ("useragent", "🧑‍💻 محلّل User-Agent"), ("diff", "🔀 مقارنة نصين (--- بينهما)"), ("date", "📅 حاسبة التواريخ"),
+) + MT.EXTRA_TOOLS
 # tools offered on the PUBLIC page (no login): pure offline computation, nothing is stored or sent anywhere
 PUBLIC_TOOLS = tuple(k for k, _ in WEB_TOOLS)
 
@@ -102,7 +100,10 @@ def run_web_tool(kind: str, text: str) -> str:
         return "\n".join(x for x in PW.describe(PW.analyze(text), "ar").splitlines() if not x.startswith("🧹"))
     if kind == "jwt":
         from .security import jwt_tool as J
-        return J.describe(J.inspect(text.strip()), "ar")
+        res = J.inspect(text.strip())
+        if not res["ok"]:
+            raise ValueError("ليس JWT صالحاً (يجب أن يكون header.payload.signature بترميز base64url)")
+        return J.describe(res, "ar")
     if kind == "cvss":
         from .security import cvss as C
         r = C.calculate(text.strip())
@@ -127,90 +128,85 @@ def run_web_tool(kind: str, text: str) -> str:
         lines = [f"{k}: {len(v)}\n  " + "\n  ".join(I.defang(x) if k in ("urls", "domains", "ips", "emails") else x for x in v[:50])
                  for k, v in r.items() if v]
         return "\n".join(lines) or "لم يُعثر على مؤشرات."
+    if kind in ("csp", "cookie", "secheaders"):
+        from .security import webconfig as W
+        fn = {"csp": W.analyze_csp, "cookie": W.analyze_cookie, "secheaders": W.analyze_headers}[kind]
+        return W.render_plain(fn(text), "ar")
+    if kind == "subnet":
+        r = P.subnet_calc(text)
+        lines = [f"{r['cidr']} (IPv{r['version']})", f"netmask {r['netmask']}" + (f" · wildcard {r['wildcard']}" if r["wildcard"] else ""),
+                 f"range {r['first']} -> {r['last']}" + (f" · broadcast {r['broadcast']}" if r["broadcast"] else ""),
+                 f"usable hosts {r['hosts']:,} of {r['addresses']:,} · {'private' if r['private'] else 'public'}"]
+        if r["subnets"]:
+            lines += [f"{r['subnet_count']} subnets:"] + r["subnets"]
+        return "\n".join(lines)
+    if kind == "cron":
+        r = P.cron_explain(text)
+        return "\n".join([r["expr"]] + [x["phrase"][0] for x in r["fields"]] + ["", "Next runs:"] + (r["next"] or ["-"]))
+    if kind in ("spf", "dmarc"):
+        from .security import mailauth as M
+        from .security import webconfig as W
+        return W.render_plain((M.analyze_spf if kind == "spf" else M.analyze_dmarc)(text), "ar")
+    if kind == "secrets":
+        from .security import mailauth as M
+        r = M.scan_secrets(text)
+        if not r["count"]:
+            return "لم أجد أسراراً معروفة (الفحص يعتمد على أنماط محددة)."
+        return f"{r['count']} سرّ محتمل ({r['high']} عالي الخطورة)\n" + "\n".join(f"[{h['severity']}] {h['type']} · سطر {h['line']}: {h['masked']}" for h in r["hits"])
+    if kind == "sri":
+        from . import devtools as DV
+        r = DV.sri_hash(text)
+        return "\n".join(f"{k}: {v}" for k, v in r["hashes"].items()) + "\n\n" + r["tag"]
+    if kind == "chmod":
+        from . import devtools as DV
+        r = DV.chmod_calc(text)
+        return f"{r['octal']}  {r['symbolic']}  (umask {r['umask']})" + "".join(f"\n[{n[0]}] {n[1]}" for n in r["notes"])
+    if kind == "cidrmatch":
+        from . import devtools as DV
+        r = DV.cidr_match(text)
+        return f"{r['matched']}/{r['total']} ضمن النطاقات\n" + "\n".join(f"{'✅' if x['match'] else '❌'} {x['ip']}" + (f" ⊂ {', '.join(x['match'])}" if x["match"] else "") for x in r["rows"])
+    if kind == "ipconv":
+        from . import devtools as DV
+        return "\n".join(f"{k}: {v}" for k, v in DV.ip_convert(text))
+    if kind == "useragent":
+        from . import devtools as DV
+        r = DV.parse_user_agent(text)
+        return f"{r['browser']} {r['browser_version']} · {r['os']} {r['os_version']}" + (" · mobile" if r["mobile"] else "") + "".join(f"\n[{f[0]}] {f[1]}" for f in r["flags"])
+    if kind == "diff":
+        from . import devtools as DV
+        r = DV.text_diff(text)
+        return "النصان متطابقان." if r["identical"] else f"+{r['added']} −{r['removed']} · تشابه ≈ {r['similarity']}%\n\n{r['diff']}"
+    if kind == "date":
+        from . import devtools as DV
+        return "\n".join(f"{k}: {v}" for k, v in DV.date_calc(text).items())
+    out = MT.run(kind, text)
+    if out is not None:
+        return out
     raise ValueError("unknown tool")
 
 
 class WebExtMixin:
     # ================================================================== navigation
     def nav(self, active: str, csrf: str) -> str:
-        items = (("/", "users", "👥 المستخدمون"), ("/chat", "chat", "💬 دردشة AI"), ("/tools", "tools", "🧰 الأدوات"),
-                 ("/audit", "audit", "🧾 السجل"), ("/system", "system", "🩺 النظام"))
-        links = "".join(f'<a class="{"on" if k == active else ""}" href="{h}">{t}</a>' for h, k, t in items)
-        return (f'<header><h1>🛡 DARWIN DZ</h1><nav class="tabs nav">{links}</nav><form method="post" action="/logout">'
-                f'<input type="hidden" name="csrf" value="{_e(csrf)}"><button>خروج</button></form></header>')
+        from .webui import sidebar
+        counts = self.db.web_counts()
+        rep = self.db.report_counts()["open"]
+        badges = {"reports": (rep, "bad"), "users": (counts["pending"], "warn")}
+        return ('<input type="checkbox" id="nv" class="navtoggle" aria-label="القائمة"><label class="scrim" for="nv"></label>'
+                f'<aside class="side" aria-label="التنقل">{sidebar(active, badges)}</aside>'
+                '<header class="top"><label class="burger" for="nv" aria-hidden="true">☰</label>'
+                '<form class="gsearch" method="get" action="/" role="search"><input type="search" name="q" maxlength="64" '
+                'placeholder="🔎 بحث سريع عن مستخدم: معرّف أو @اسم أو اسم" aria-label="بحث"><button>بحث</button></form><span class="sp"></span>'
+                f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{_e(csrf)}"><button>خروج</button></form></header>')
+
+    _BAD_FLASH = ("🔍", "🚫", "🛡", "☑️", "✍️", "⚠️", "⏳", "قيمة", "إجراء", "تعذّر", "لا ", "فعّل")
 
     def _flash(self, sess: dict) -> str:
         flash, sess["flash"] = sess.get("flash") or "", ""
-        return f'<div class="flash">{_e(flash)}</div>' if flash else ""
-
-    # ================================================================== AI chat
-    def persona_options(self, current: str) -> str:
-        return "".join(f'<option value="{_e(k)}"{" selected" if k == current else ""}>{_e(p["ar"])}</option>'
-                       for k, p in PERSONAS.items())
-
-    def chat_page(self, sess: dict) -> bytes:
-        csrf, hist = sess["csrf"], sess.get("chat") or []
-        persona = sess.get("persona") if sess.get("persona") in PERSONAS else "default"
-        bubbles = []
-        for m in hist:
-            who, cls = ("أنت", "me") if m["role"] == "user" else ("DARWIN DZ", "ai")
-            bubbles.append(f'<div class="msg {cls}"><b>{who}</b><div class="txt">{_e(m["content"])}</div></div>')
-        empty = '<p class="mut">ابدأ المحادثة: اكتب سؤالك أدناه. الرد يصل بعد اكتماله (قد يستغرق حتى دقيقة).</p>' if not bubbles else ""
-        form = (f'<form class="chatform" method="post" action="/chat/send"><input type="hidden" name="csrf" value="{_e(csrf)}">'
-                f'<select name="persona">{self.persona_options(persona)}</select>'
-                f'<textarea name="msg" rows="4" maxlength="{CHAT_MAX_INPUT}" placeholder="اكتب رسالتك…" required autofocus></textarea>'
-                f'<div class="row"><button class="p">إرسال ⬆️</button></div></form>')
-        clear = (f'<form method="post" action="/chat/clear"><input type="hidden" name="csrf" value="{_e(csrf)}">'
-                 f'<button>🗑 محادثة جديدة</button></form>')
-        body = (f'{self.nav("chat", csrf)}<main>{self._flash(sess)}<h2>💬 التواصل مع الذكاء الاصطناعي</h2>'
-                f'<div class="chat">{empty}{"".join(bubbles)}</div>{form}<div class="row">{clear}</div>'
-                f'<p class="mut">المحادثة تُحفظ في جلسة الدخول فقط ولا تُخزَّن في قاعدة البيانات.</p></main>')
-        return self.page(body, "دردشة AI")
-
-    def chat_send(self, sess: dict, persona: str, text: str) -> str:
-        """-> error text ('' on success). Sync call to the model (the HTTP server is threaded)."""
-        text = (text or "").strip()[:CHAT_MAX_INPUT]
-        if not text:
-            return "اكتب رسالة أولاً."
-        now = time.time()
-        sess["chat_times"] = [t for t in sess.get("chat_times", []) if now - t < CHAT_RATE[1]]
-        if len(sess["chat_times"]) >= CHAT_RATE[0]:
-            return "رسائل كثيرة بسرعة. انتظر قليلاً."
-        if sess.get("chat_busy"):
-            return "ما زال الرد السابق قيد المعالجة."
-        persona = persona if persona in PERSONAS else "default"
-        sess["persona"] = persona
-        p = PERSONAS[persona]
-        system = "\n\n".join(x for x in (CORE_PROMPT if p.get("core") else "", self.cfg.system_prompt, p["prompt"],
-                                         SAFETY_TAIL if p.get("core") else "") if x)
-        hist = list(sess.get("chat") or [])
-        hist.append({"role": "user", "content": text})
-        kept, total = [], 0
-        for m in reversed(hist[-CHAT_MAX_MSGS:]):
-            total += len(m["content"])
-            if total > CHAT_MAX_CHARS and kept:
-                break
-            kept.append(m)
-        kept.reverse()
-        msgs = ([{"role": "system", "content": system}] if system else []) + kept
-        sess["chat_times"].append(now)
-        sess["chat_busy"] = True
-        try:
-            reply, usage = self.app.ai.chat(msgs, self.cfg.default_temp, stream=False)
-        except APIError as e:
-            return self.app._err_text("ar", e).replace("<b>", "").replace("</b>", "")
-        except Exception:
-            log.exception("web chat failed")
-            return "تعذّر الاتصال بالذكاء الاصطناعي الآن."
-        finally:
-            sess["chat_busy"] = False
-        hist.append({"role": "assistant", "content": reply})
-        sess["chat"] = hist[-CHAT_MAX_MSGS:]
-        try:
-            self.db.add_usage(next(iter(sorted(self.cfg.admin_ids)), 0), int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)))
-        except Exception:                                   # accounting must never break the chat
-            log.debug("web chat usage not recorded", exc_info=True)
-        return ""
+        if not flash:
+            return ""
+        cls = "bad" if flash.startswith(self._BAD_FLASH[:3] + ("⚠️",)) else "warn" if flash.startswith(self._BAD_FLASH[3:]) else ""
+        return f'<div class="flash {cls}" role="status">{_e(flash)}</div>'
 
     # ================================================================== tools page
     def tools_page(self, sess: dict) -> bytes:
@@ -275,14 +271,6 @@ class WebExtMixin:
             return 500, self.public_tools_page(kind, text[:2000], error="تعذّر تنفيذ الأداة.")
 
     # ================================================================== audit / system
-    def audit_page(self, sess: dict) -> bytes:
-        rows = self.db.list_audit(150)
-        trs = "".join(f'<tr><td>{_e(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"])))}</td><td><code>{_e(r["user_id"])}</code></td>'
-                      f'<td>{_e(r["action"])}</td><td class="mut">{_e((r["detail"] or "")[:120])}</td></tr>' for r in rows)
-        table = ('<div class="wrap"><table style="min-width:600px"><thead><tr><th>الوقت</th><th>المنفِّذ</th><th>الإجراء</th><th>تفاصيل</th></tr></thead><tbody>'
-                 + (trs or '<tr><td colspan="4" class="mut">لا توجد سجلات.</td></tr>') + '</tbody></table></div>')
-        return self.page(f'{self.nav("audit", sess["csrf"])}<main>{self._flash(sess)}<h2>🧾 سجل التدقيق (آخر 150)</h2>{table}</main>', "السجل")
-
     def system_page(self, sess: dict) -> bytes:
         from .utils import fmt_duration
         import platform

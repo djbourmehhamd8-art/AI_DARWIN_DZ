@@ -82,10 +82,12 @@ AI_TASKS = (
 )
 WORLD_KINDS = ("radar", "flight", "plane", "metar", "weather", "radio", "freq", "wave", "morse", "phonetic", "grid", "power", "fspl",
               "horizon", "dist", "subdomains", "asn", "rdns", "mac", "exposure")
+LOCAL_INPUT_MAX = 60_000                      # local tools never need more; bounds regex work on huge pasted/uploaded input
 LOCAL_KINDS = frozenset(k for k, *_ in TOOLS) | frozenset(WORLD_KINDS) | frozenset(UTIL_KINDS)
 TASK_KINDS = frozenset(k for k, *_ in AI_TASKS)
 ADMIN_KINDS = {"adm_dm": "dmq", "adm_find": "find", "bc_text": None, "adm_ban": "ban", "adm_unban": "unban", "adm_allow": "allow", "adm_disallow": "disallow"}
-OTHER_KINDS = frozenset({"tool", "web_q", "mem_add", "rem_add", "sys", "case_new", "note_q"})
+REPORT_PENDING = ("rep_bug", "rep_tool", "rep_idea", "rep_abuse", "rep_other", "rep_reply")
+OTHER_KINDS = frozenset(REPORT_PENDING) | frozenset({"tool", "hubq", "web_q", "mem_add", "rem_add", "sys", "case_new", "note_q"})
 ASKABLE = LOCAL_KINDS | TASK_KINDS | OTHER_KINDS | frozenset(ADMIN_KINDS)
 
 HINTS = {
@@ -110,6 +112,13 @@ HINTS = {
     "rdns": ("🔁 أرسل عنوان IP عاماً لاسم المضيف العكسي", "🔁 Send a public IP for its reverse DNS name"),
     "mac": ("🏷 أرسل عنوان MAC لمعرفة الشركة المصنّعة", "🏷 Send a MAC address to learn the manufacturer"),
     "exposure": ("🔓 أرسل IP أو نطاق أصلك لمعرفة ما يعرفه الإنترنت عنه", "🔓 Send your asset's IP or domain to see what the internet already knows"),
+    "rep_bug": ("🐞 صف الخطأ: ماذا فعلت وماذا حدث؟ (سأرفق إصدار البوت وآخر أداة استخدمتها فقط، لا محادثاتك).", "🐞 Describe the bug: what did you do and what happened? (I attach only the bot version and your last tool, never your chats.)"),
+    "rep_tool": ("🧰 اذكر اسم الأداة والمدخل والنتيجة التي ظهرت والنتيجة التي تتوقعها. لا ترسل كلمات مرور أو مفاتيح حقيقية.", "🧰 Give the tool name, the input, the result you got and what you expected. Never send real passwords or keys."),
+    "rep_idea": ("💡 اكتب اقتراحك أو الميزة التي تريدها.", "💡 Write your idea or the feature you want."),
+    "rep_abuse": ("🚫 صف الإساءة أو المحتوى المخالف (من، أين، ماذا).", "🚫 Describe the abuse or bad content (who, where, what)."),
+    "rep_other": ("❓ اكتب ملاحظتك أو مشكلتك.", "❓ Write your note or problem."),
+    "rep_reply": ("💬 اكتب ردّك على البلاغ. سيصل للمستخدم ويُغلق البلاغ.", "💬 Type your reply to the report. The user gets it and the report is closed."),
+    "hubq": ("🔎 اكتب كلمة للبحث عن أداة (مثال: dns أو cookie أو ip أو hash).", "🔎 Type a word to find a tool (e.g. dns, cookie, ip or hash)."),
     "tool": ("🧭 صف حاجتك (مثال: أريد تحليل ذاكرة جهاز مصاب، أو أداة لمراقبة شبكة صغيرة).", "🧭 Describe your need (e.g. memory analysis of an infected host, or monitoring a small network)."),
     "domain": ("🌐 أرسل نطاقاً أو رابطاً (example.com) لتقرير شامل: DNS وعمر النطاق وTLS ورؤوس الأمان.", "🌐 Send a domain or link (example.com) for a full report: DNS, domain age, TLS and security headers."),
     "dns": ("🧬 أرسل نطاقاً لعرض سجلات DNS وحماية البريد (SPF/DMARC).", "🧬 Send a domain to see DNS records and email authentication (SPF/DMARC)."),
@@ -175,18 +184,18 @@ class UIMixin:
 
     def main_menu(self, lang, admin=False):
         rows = [
-            [("🧰 " + tr(lang, "أدوات الأمن", "Security tools"), "m:tools"),
+            [("🧰 " + tr(lang, "مركز الأدوات", "Tools hub"), "h:home", "primary"),
              ("🤖 " + tr(lang, "مساعد الأمن", "AI assistant"), "m:ai")],
             [("🗂 " + tr(lang, "القضايا", "Cases"), "m:cases"), ("📌 " + tr(lang, "مكتبتي", "Library"), "m:notes"),
              ("✅ " + tr(lang, "قوائم التحقق", "Checklists"), "m:ck")],
-            [("🆕 " + tr(lang, "جديدة", "New"), "act:new"), ("🔁 " + tr(lang, "إعادة", "Retry"), "act:retry"),
-             ("⏹ " + tr(lang, "إيقاف", "Stop"), "act:stop")],
-            [("🌍 " + tr(lang, "العالم المباشر", "Live world"), "m:world"), ("🔎 " + tr(lang, "بحث ويب", "Web search"), "t:web_q")],
-            [("📁 " + tr(lang, "ملفات", "Files"), "m:files"), ("📚 " + tr(lang, "دليل الأدوات", "Tools guide"), "m:toolkit")],
-            [("🧮 " + tr(lang, "أدوات إضافية", "Extra tools"), "m:utils"), ("🌐 " + tr(lang, "دردشة AI (ويب)", "AI chat (web)"), "m:wc")],
+            [("🌍 " + tr(lang, "العالم المباشر", "Live world"), "m:world"), ("🔎 " + tr(lang, "بحث ويب", "Web search"), "t:web_q"),
+             ("📁 " + tr(lang, "ملفات", "Files"), "m:files")],
             [("🧠 " + tr(lang, "الذاكرة", "Memory"), "m:mem"), ("⏰ " + tr(lang, "التذكيرات", "Reminders"), "m:rem"),
              ("⚙️ " + tr(lang, "الإعدادات", "Settings"), "m:set")],
-            [("👤 " + tr(lang, "لوحتي", "My dashboard"), "act:me"), ("❓ " + tr(lang, "مساعدة", "Help"), "act:help")],
+            [("🆕 " + tr(lang, "جديدة", "New"), "act:new"), ("🔁 " + tr(lang, "إعادة", "Retry"), "act:retry"),
+             ("⏹ " + tr(lang, "إيقاف", "Stop"), "act:stop")],
+            [("👤 " + tr(lang, "لوحتي", "My dashboard"), "act:me"), ("❓ " + tr(lang, "مساعدة", "Help"), "act:help"),
+             ("🐞 " + tr(lang, "بلاغ", "Report"), "rp:menu")],
         ]
         if admin:
             rows.append([("👑 " + tr(lang, "لوحة المدير", "Admin panel"), "m:adm")])
@@ -366,6 +375,10 @@ class UIMixin:
                 self.tg.send_message(chat_id, t(lang, "admin_only"))
                 return
             self.admin_commands[ADMIN_KINDS[kind]](chat_id, user, text)
+        elif kind in REPORT_PENDING:
+            self.report_pending(chat_id, user, kind, text)
+        elif kind == "hubq":
+            self.cmd_hub(chat_id, user, text)
         elif kind == "web_q":
             self.cmd_search(chat_id, user, text)
         elif kind == "tool":
@@ -381,7 +394,8 @@ class UIMixin:
         elif kind == "note_q":
             self.show_notes(chat_id, user, None, 0, text.strip()[:60])
         else:
-            self.commands[kind](chat_id, user, text)
+            self.note_tool(user["id"], kind)
+            self.commands[kind](chat_id, user, text[:LOCAL_INPUT_MAX] if kind in LOCAL_KINDS else text)
 
     # ------------------------------------------------------------------ callbacks
     def on_callback(self, cb: dict) -> None:
@@ -420,6 +434,8 @@ class UIMixin:
         action, v, w = parts[0], (parts[1] if len(parts) > 1 else ""), (parts[2] if len(parts) > 2 else "")
         admin = self.is_staff(uid)                               # admins and moderators; admin_callback enforces the split
 
+        if self.hub_callback(action, v, w, chat_id, user, mid) or self.report_callback(action, v, w, chat_id, user, mid):
+            return
         if self.workspace_callback(action, v, w, parts, chat_id, user, mid):
             return
         if action == "m":

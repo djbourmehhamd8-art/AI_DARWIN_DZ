@@ -270,7 +270,7 @@ class AdvToolsMixin:
     # ------------------------------------------------------------------ tool catalogue
     def show_toolkit(self, chat_id, user, mid=None) -> None:
         lang = user["lang"]
-        items = [(f"{ic} {ar if lang == 'ar' else en}", f"tk:{k}") for k, ic, ar, en, n in toolkit.categories()]
+        items = [(f"{ic} {ar if lang == 'ar' else en}", f"tk:{k}") for k, ic, ar, en, _n in toolkit.categories()]
         rows = [items[i:i + 2] for i in range(0, len(items), 2)]
         rows.append([("🧭 " + tr(lang, "اقترح لي أداة لحاجتي", "Recommend a tool for my need"), "t:tool", "success")])
         rows.append(self.home_row(lang))

@@ -7,10 +7,12 @@ import time
 
 import requests
 
+from . import USER_AGENT
+
 CVE_ID = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.I)
 TTL = 6 * 3600
 _cache: dict = {}
-UA = "DarwinBot/4.2 (defensive security assistant)"
+UA = f"{USER_AGENT} (defensive security assistant)"
 
 
 def find_ids(text: str, limit: int = 3) -> list:

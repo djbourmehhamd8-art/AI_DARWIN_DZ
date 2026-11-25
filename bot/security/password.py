@@ -71,7 +71,7 @@ def analyze(pw: str) -> dict:
 
 def _crack_time(bits: float, rate: float = 1e10) -> str:
     """Average time for an offline attacker doing `rate` guesses/s against a fast hash."""
-    sec = (2 ** max(bits, 0) / 2) / rate
+    sec = (2 ** min(max(bits, 0), 400) / 2) / rate         # cap: 2**1100 overflows a float on long passphrases
     for unit, size in (("years", 31_557_600), ("days", 86400), ("hours", 3600), ("minutes", 60)):
         if sec >= size:
             n = sec / size
@@ -133,7 +133,7 @@ def describe(res: dict, lang: str, pwned: int | None = None) -> str:
     lines += [f"• {ISSUE_TEXT[c][i]}" for c in res["issues"]]
     if pwned is not None:
         if pwned > 0:
-            lines.append(f"🚨 " + (f"ظهرت في تسريبات {pwned:,} مرة. لا تستخدمها أبداً." if lang == "ar"
+            lines.append("🚨 " + (f"ظهرت في تسريبات {pwned:,} مرة. لا تستخدمها أبداً." if lang == "ar"
                                   else f"Found in breaches {pwned:,} times. Never use it."))
         elif pwned == 0:
             lines.append("✅ " + ("غير موجودة في التسريبات المعروفة." if lang == "ar" else "Not found in known breaches."))

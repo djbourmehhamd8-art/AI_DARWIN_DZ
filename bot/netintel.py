@@ -13,9 +13,11 @@ from datetime import datetime
 
 import requests
 
+from . import USER_AGENT
+
 from . import websearch
 
-UA = "Mozilla/5.0 (compatible; DarwinBot/4.2; defensive-security)"
+UA = f"Mozilla/5.0 (compatible; {USER_AGENT}; defensive-security)"
 _LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
 TYPES = {"A": 1, "NS": 2, "MX": 15, "TXT": 16, "AAAA": 28, "CAA": 257}
 
@@ -25,7 +27,10 @@ def valid_domain(text: str):
     """Return a clean lowercase (punycode) domain, or None. Accepts a URL or a bare domain; rejects IPs and localhost."""
     s = (text or "").strip().lower()
     if "://" in s:
-        s = urllib.parse.urlsplit(s).hostname or ""
+        try:
+            s = urllib.parse.urlsplit(s).hostname or ""
+        except ValueError:                                              # "http://[abc" -> Invalid IPv6 URL: reject, don't raise
+            return None
     s = s.split("/")[0].split("?")[0].split("#")[0].rstrip(".")
     if not s or len(s) > 253 or s in ("localhost",) or re.fullmatch(r"[\d.]+", s) or ":" in s:
         return None
@@ -111,7 +116,12 @@ def rdap_domain(domain: str, http=requests, timeout: float = 8, now=None) -> dic
         return {"ok": False, "error": "not_found"}
     if r.status_code != 200:
         return {"ok": False, "error": f"HTTP {r.status_code}"}
-    j = r.json()
+    try:
+        j = r.json()
+    except ValueError:
+        return {"ok": False, "error": "bad_response"}
+    if not isinstance(j, dict):
+        return {"ok": False, "error": "bad_response"}
     ev = {e.get("eventAction"): e.get("eventDate") for e in j.get("events", [])}
 
     def ts(x):

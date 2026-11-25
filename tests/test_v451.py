@@ -32,11 +32,11 @@ class CheaperWrites(unittest.TestCase):
     def test_daily_counts_and_old_rows_pruned(self):
         db = Storage(":memory:")
         self.addCleanup(db.close)
-        db._exec("INSERT INTO daily(user_id, day, n) VALUES(7, date('now','-30 day'), 5)")
+        db._exec("INSERT INTO daily(user_id, day, n) VALUES(7, date('now','-40 day'), 5)")
         for _ in range(3):
             db.bump_daily(7)
         self.assertEqual(db.daily_count(7), 3)
-        self.assertIsNone(db._one("SELECT 1 FROM daily WHERE day < date('now','-7 day')"))
+        self.assertIsNone(db._one("SELECT 1 FROM daily WHERE day < date('now','-35 day')"))
 
     def test_audit_stays_bounded_and_newest_kept(self):
         db = Storage(":memory:")

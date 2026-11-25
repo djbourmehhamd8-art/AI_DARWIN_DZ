@@ -358,7 +358,7 @@ class WorldToolsMixin:
 
     def cmd_fspl(self, chat_id, user, args):
         lang = user["lang"]
-        m = re.fullmatch(r"\s*(\S+(?:\s*[a-zA-Z]+)?)\s+([0-9]+(?:[.,][0-9]+)?)\s*(km|m)?\s*", args or "")
+        m = re.fullmatch(r"\s*(\S{1,40}(?:\s*[a-zA-Z]{1,6})?)\s+([0-9]{1,12}(?:[.,][0-9]{1,12})?)\s*(km|m)?\s*", (args or "")[:200])   # bounded: no backtracking blow-up
         hz = R.parse_freq(m.group(1)) if m else None
         if not (m and hz):
             return self.tg.send_message(chat_id, tr(lang, "📉 /fspl تردد مسافة — مثال: /fspl 145.5MHz 10km", "📉 /fspl frequency distance — e.g. /fspl 145.5MHz 10km"))
@@ -443,7 +443,7 @@ class WorldToolsMixin:
         q = [f"OUI: <code>{r['oui']}</code>", f"{tr(lang, 'الشركة', 'Vendor')}: <b>{_e(r.get('vendor') or tr(lang, 'غير معروفة', 'unknown'))}</b>"]
         if r["random"]:
             q.append("🎲 " + tr(lang, "عنوان محلي/عشوائي (خصوصية الجهاز): لا يدل على مصنّع.", "Locally administered / randomised address: does not identify a maker."))
-        self._send(chat_id, [f"🏷 <b>MAC</b>", "<blockquote>" + "\n".join(q) + "</blockquote>"])
+        self._send(chat_id, ["🏷 <b>MAC</b>", "<blockquote>" + "\n".join(q) + "</blockquote>"])
 
     def cmd_exposure(self, chat_id, user, args):
         lang = user["lang"]
@@ -500,7 +500,7 @@ class WorldToolsMixin:
 
     def show_portals(self, chat_id, user, mid=None) -> None:
         lang = user["lang"]
-        items = [(f"{ic} {ar if lang == 'ar' else en}", f"pt:{k}") for k, ic, ar, en, n in portals.categories()]
+        items = [(f"{ic} {ar if lang == 'ar' else en}", f"pt:{k}") for k, ic, ar, en, _n in portals.categories()]
         rows = [items[i:i + 2] for i in range(0, len(items), 2)] + [[("🔙 " + tr(lang, "العالم", "World"), "m:world")] + self.home_row(lang)]
         text = (f"🧭 <b>{tr(lang, 'بوابات الويب المباشرة', 'Live web portals')}</b>\n<i>{tr(lang, 'اضغط لفتح الموقع داخل تيليجرام (في المحادثة الخاصة) — مواقع رسمية فقط.', 'Tap to open the site inside Telegram (private chats) — official sites only.')}</i>")
         self._html_screen(chat_id, mid, text, kb(rows))

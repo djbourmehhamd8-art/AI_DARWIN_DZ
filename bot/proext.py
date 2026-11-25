@@ -5,8 +5,10 @@ The logic lives in proutils.py (pure functions, shared with the web panel); this
 from __future__ import annotations
 
 import html
+from urllib.parse import urlsplit
 
 from . import proutils as P
+from .security import webconfig as W
 from .utils import safe_int
 from .ui import kb, tr
 from .utildata import UTIL_HINTS, UTIL_KINDS, UTILS
@@ -35,23 +37,47 @@ class ProExtMixin:
         self._screen(chat_id, mid, tr(lang, "🧮 أدوات إضافية — اختر أداة:", "🧮 Extra tools — pick one:"), self.util_kb(lang))
 
     def web_chat_url(self) -> str:
-        base = (self.cfg.web_panel_url or "").rstrip("/")
-        return f"{base}/chat" if base else ""
+        """Address of the standalone chat website ('' when it is not enabled)."""
+        cfg = self.cfg
+        if not cfg.web_chat_port:
+            return ""
+        return cfg.web_chat_url or f"http://127.0.0.1:{cfg.web_chat_port}"
 
     def show_webchat(self, chat_id, user, mid=None) -> None:
-        lang, url = user["lang"], self.web_chat_url()
-        if url and self.is_admin(user["id"]):
-            text = tr(lang, "🌐 <b>دردشة الذكاء الاصطناعي في لوحة الويب</b>\nافتح الرابط وسجّل دخولك بكلمة مرور اللوحة.",
-                      "🌐 <b>AI chat in the web panel</b>\nOpen the link and sign in with the panel password.")
-            markup = kb([[("🌐 " + tr(lang, "افتح الدردشة", "Open chat"), url, "primary")], self.home_row(lang)])
-        elif url:
-            text = tr(lang, "🌐 دردشة الويب متاحة لمدير البوت فقط. استخدم الدردشة هنا مباشرة بإرسال رسالتك.",
+        lang, url, cfg = user["lang"], self.web_chat_url(), self.cfg
+        secret = ""
+        if not url:
+            text = tr(lang, "🌐 دردشة الويب غير مفعّلة بعد. على المدير ضبط <code>WEB_CHAT_PORT</code> (منفذ موقع الدردشة المستقل) ثم إعادة التشغيل.",
+                      "🌐 The web chat is not enabled yet. The admin must set <code>WEB_CHAT_PORT</code> (the standalone chat site's port) and restart.")
+            markup = kb([self.home_row(lang)])
+        elif cfg.web_chat_public or self.is_admin(user["id"]):
+            text = tr(lang, "🌐 <b>موقع دردشة DARWIN DZ</b>\nموقع مستقل عن لوحة الإدارة. افتح الرابط وابدأ المحادثة.",
+                      "🌐 <b>DARWIN DZ chat website</b>\nA site separate from the admin panel. Open the link and start chatting.")
+            if not cfg.web_chat_public:
+                secret = f"\n🔑 {tr(lang, 'كلمة المرور', 'Password')}: <code>{cfg.web_chat_password}</code>\n" + tr(
+                    lang, "⏳ تُحذف هذه الرسالة بعد دقيقتين. لا تشاركها.", "⏳ This message deletes itself in 2 minutes. Do not share it.")
+                text += secret
+            host = (urlsplit(url).hostname or "").lower()
+            if host in ("127.0.0.1", "localhost", "::1") or host.endswith(".local"):
+                # Telegram rejects URL buttons that point at localhost/private hosts (the whole message then fails and the admin
+                # never sees the password), so a local address goes into the text instead of a button.
+                text += f"\n🔗 <code>{_e(url)}</code>"
+                markup = kb([self.home_row(lang)])
+            else:
+                markup = kb([[("🌐 " + tr(lang, "افتح الدردشة", "Open chat"), url, "primary")], self.home_row(lang)])
+        else:
+            text = tr(lang, "🌐 دردشة الويب خاصة بمدير البوت. استخدم الدردشة هنا مباشرة بإرسال رسالتك.",
                       "🌐 The web chat is for the bot admin only. Just send your message here to chat.")
             markup = kb([self.home_row(lang)])
-        else:
-            text = tr(lang, "🌐 دردشة الويب غير مفعّلة بعد. على المدير ضبط <code>WEB_PANEL_URL</code> (عنوان موقع البوت) ثم إعادة التشغيل.",
-                      "🌐 The web chat is not enabled yet. The admin must set <code>WEB_PANEL_URL</code> (the bot's site address) and restart.")
+        if secret and chat_id > 0:                      # a password never goes into a group, and is never an edited-in-place screen
+            sent = self.tg.send_rich(chat_id, text, text, markup)
+            if isinstance(sent, dict) and sent.get("message_id"):
+                self.schedule_delete(chat_id, sent["message_id"], 120)
+            return
+        if secret:
+            text = text.replace(secret, "")
             markup = kb([self.home_row(lang)])
+            text = tr(lang, "🔒 كلمة المرور تُرسل في المحادثة الخاصة فقط.", "🔒 The password is only sent in private chat.")
         if mid and self.tg.edit_rich(chat_id, mid, text, text, markup):
             return
         self.tg.send_rich(chat_id, text, text, markup)
@@ -156,3 +182,65 @@ class ProExtMixin:
     def cmd_uuid(self, chat_id, user, args) -> None:
         n = safe_int(args, 3)
         self._util_run(chat_id, user, "uuid", "", lambda a: ["🆔 <b>UUID v4</b>"] + [f"<code>{u}</code>" for u in P.make_uuids(n)])
+
+    # ------------------------------------------------------------------ defensive web / network helpers (v4.7)
+    @staticmethod
+    def _findings(lang, res: dict, limit: int = 14) -> list:
+        i = 1 if lang == "ar" else 2
+        lines = [f"{W.SEV_ICON[f[0]]} {_e(f[i])}" for f in res["findings"][:limit]]
+        if len(res["findings"]) > limit:
+            lines.append(f"… +{len(res['findings']) - limit}")
+        return lines
+
+    def cmd_csp(self, chat_id, user, args) -> None:
+        def f(a):
+            r = W.analyze_csp(a)
+            lg = user["lang"]
+            return [f"🛡 <b>CSP</b> · {tr(lg, 'التقييم', 'Grade')} <b>{r['grade']}</b> ({r['score']}/100) · {len(r['directives'])} {tr(lg, 'توجيهاً', 'directives')}", ""] + self._findings(lg, r)
+        self._util_run(chat_id, user, "csp", args, f)
+
+    def cmd_cookie(self, chat_id, user, args) -> None:
+        def f(a):
+            r = W.analyze_cookie(a)
+            lg = user["lang"]
+            return [f"🍪 <b>{_e(r['name'])}</b> · {tr(lg, 'التقييم', 'Grade')} <b>{r['grade']}</b> ({r['score']}/100)",
+                    f"{tr(lg, 'الخصائص', 'Attributes')}: <code>{_e(', '.join(r['attrs']) or '-')}</code> · {tr(lg, 'طول القيمة', 'value length')}: {r['value_len']}", ""] + self._findings(lg, r)
+        self._util_run(chat_id, user, "cookie", args, f)
+
+    def cmd_secheaders(self, chat_id, user, args) -> None:
+        def f(a):
+            r = W.analyze_headers(a)
+            lg = user["lang"]
+            return [f"🧱 <b>{tr(lg, 'ترويسات الأمان', 'Security headers')}</b> · {tr(lg, 'التقييم', 'Grade')} <b>{r['grade']}</b> ({r['score']}/100) · {r['count']} {tr(lg, 'ترويسة', 'headers')}", ""] + self._findings(lg, r, 18)
+        self._util_run(chat_id, user, "secheaders", args, f)
+
+    def cmd_subnet(self, chat_id, user, args) -> None:
+        def f(a):
+            r = P.subnet_calc(a)
+            lg = user["lang"]
+            lines = [f"🕸 <b>{_e(r['cidr'])}</b> · IPv{r['version']}",
+                     f"{tr(lg, 'قناع الشبكة', 'Netmask')}: <code>{_e(r['netmask'])}</code>" + (f" · wildcard <code>{_e(r['wildcard'])}</code>" if r["wildcard"] else ""),
+                     f"{tr(lg, 'النطاق', 'Range')}: <code>{_e(r['first'])}</code> → <code>{_e(r['last'])}</code>"]
+            if r["broadcast"]:
+                lines.append(f"Broadcast: <code>{_e(r['broadcast'])}</code>")
+            lines.append(f"{tr(lg, 'عناوين قابلة للاستخدام', 'Usable hosts')}: <b>{r['hosts']:,}</b> ({r['addresses']:,} {tr(lg, 'إجمالاً', 'total')}) · {tr(lg, 'خاصة' if r['private'] else 'عامة', 'private' if r['private'] else 'public')}")
+            if r["subnets"]:
+                lines.append(f"\n✂️ {r['subnet_count']} {tr(lg, 'شبكة فرعية', 'subnets')}:")
+                lines.extend(f"<code>{_e(x)}</code>" for x in r["subnets"])
+                if r["subnet_count"] > len(r["subnets"]):
+                    lines.append(f"… +{r['subnet_count'] - len(r['subnets'])}")
+            return lines
+        self._util_run(chat_id, user, "subnet", args, f)
+
+    def cmd_cron(self, chat_id, user, args) -> None:
+        def f(a):
+            r = P.cron_explain(a)
+            lg, i = user["lang"], 0 if user["lang"] == "ar" else 1
+            lines = [f"⏰ <code>{_e(r['expr'])}</code>", ""] + [f"• {_e(x['phrase'][i])}" for x in r["fields"]]
+            if r["dom_dow_or"]:
+                lines.append("ℹ️ " + tr(lg, "يوم الشهر ويوم الأسبوع معاً: يكفي تحقق أحدهما (سلوك cron القياسي).", "Day-of-month and day-of-week both set: either may match (standard cron behaviour)."))
+            lines.append("\n" + tr(lg, "التشغيلات القادمة:", "Next runs:"))
+            lines.extend(f"<code>{_e(x)}</code>" for x in r["next"]) if r["next"] else lines.append(tr(lg, "لا تشغيل خلال 8 سنوات.", "No run within 8 years."))
+            return lines
+        self._util_run(chat_id, user, "cron", args, f)
+

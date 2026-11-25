@@ -78,10 +78,13 @@ def lookup(query: str) -> list:
     return out[:30]
 
 
+EM_SPACE = "\u2003"
+
+
 def describe(items: list, lang: str) -> list:
     """HTML lines."""
     import html
     lines = []
     for p, (svc, risk, ar, en) in items:
-        lines.append(f"{RISK[risk]} <b>{p}</b> · {html.escape(svc)}\n{'\u2003'}{html.escape(ar if lang == 'ar' else en)}")
+        lines.append(f"{RISK[risk]} <b>{p}</b> · {html.escape(svc)}\n{EM_SPACE}{html.escape(ar if lang == 'ar' else en)}")
     return lines

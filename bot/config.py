@@ -62,6 +62,14 @@ def derive_panel_password(telegram_token: str) -> str:
     return base64.b32encode(mac)[:20].decode("ascii").lower()
 
 
+def derive_chat_password(telegram_token: str) -> str:
+    """Web chat password when WEB_CHAT_PASSWORD is not set (different label from the panel's, so the two never match)."""
+    if not telegram_token:
+        return ""
+    mac = hmac.new(telegram_token.encode("utf-8"), b"darwin-dz-web-chat-v1", hashlib.sha256).digest()
+    return base64.b32encode(mac)[:16].decode("ascii").lower()
+
+
 def _ids(value: str) -> frozenset:
     out = set()
     for x in value.replace(" ", "").split(","):
@@ -118,6 +126,13 @@ class Config:
     web_panel_token: str = ""          # the panel password (at least 12 characters)
     web_panel_hosts: tuple = ()        # extra Host names accepted when the panel sits behind a reverse proxy
     web_panel_url: str = ""            # public HTTPS address of the web panel, e.g. https://laplace.fadehost.com (adds the admin-panel button)
+    web_chat_port: int = 0             # standalone AI chat website: 0 = off, else its own local port (separate from the admin panel)
+    web_chat_host: str = "127.0.0.1"
+    web_chat_password: str = ""        # chat password (8+ chars); derived from the bot token when unset. Admins get it with /webchat
+    web_chat_public: bool = False      # True = no password: anyone with the link can chat (limits below still apply)
+    web_chat_url: str = ""             # public HTTPS address of the chat site (adds the button in Telegram)
+    web_chat_hosts: tuple = ()
+    web_chat_daily: int = 300          # total web-chat messages per day for the whole site (0 = unlimited)
     groups: bool = True                # answer in groups (each group must be authorised unless GROUP_OPEN)
     group_open: bool = False           # True = answer in ANY group without authorisation
     group_triggers: tuple = ("dz", "دي زد")
@@ -151,6 +166,14 @@ class Config:
                 extra = (u.hostname.lower(), (u.hostname.lower() + ":" + str(u.port)) if u.port else u.hostname.lower())
         return tuple(dict.fromkeys(self.web_panel_hosts + extra))
 
+    def web_chat_hostnames(self) -> tuple:
+        extra = ()
+        if self.web_chat_url:
+            u = urlsplit(self.web_chat_url)
+            if u.hostname:
+                extra = (u.hostname.lower(), (u.hostname.lower() + ":" + str(u.port)) if u.port else u.hostname.lower())
+        return tuple(dict.fromkeys(self.web_chat_hosts + extra))
+
     def ai_keys(self) -> list:
         """ONLY the AI provider keys: these (and nothing else) may be sent to API_BASE_URL."""
         from .keypool import parse_keys
@@ -159,7 +182,8 @@ class Config:
     def all_keys(self) -> list:
         """Every secret value (AI keys + Brave + NVD + panel password). For log redaction ONLY, never for requests."""
         return self.ai_keys() + [k for k in (self.brave_api_key, self.nvd_api_key,
-                                                                  self.web_panel_token if (self.web_panel_port or self.web_panel_token != derive_panel_password(self.telegram_token)) else "") if k]
+                                                                  self.web_panel_token if (self.web_panel_port or self.web_panel_token != derive_panel_password(self.telegram_token)) else "",
+                                                                  self.web_chat_password if (self.web_chat_port or self.web_chat_password != derive_chat_password(self.telegram_token)) else "") if k]
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -176,6 +200,9 @@ class Config:
         panel_token = e("WEB_PANEL_TOKEN", "").strip()
         if len(panel_token) < 12:                                    # missing or too short: never crash, derive a strong one
             panel_token = derive_panel_password(tg_token)
+        chat_password = e("WEB_CHAT_PASSWORD", "").strip()
+        if len(chat_password) < 8:
+            chat_password = derive_chat_password(tg_token)
         return cls(
             telegram_token=tg_token,
             api_key=keys[0] if keys else "",
@@ -214,6 +241,13 @@ class Config:
             web_panel_token=panel_token,
             web_panel_hosts=tuple(h.strip().lower() for h in e("WEB_PANEL_HOSTS", "").split(",") if h.strip()),
             web_panel_url=first_env("WEB_PANEL_URL", "PUBLIC_URL", "APP_URL").rstrip("/"),
+            web_chat_port=max(0, _num(e("WEB_CHAT_PORT", ""), 0, int)),
+            web_chat_host=e("WEB_CHAT_HOST", "").strip() or cls.web_chat_host,
+            web_chat_password=chat_password,
+            web_chat_public=_bool(e("WEB_CHAT_PUBLIC", ""), False),
+            web_chat_url=e("WEB_CHAT_URL", "").strip().rstrip("/"),
+            web_chat_hosts=tuple(h.strip().lower() for h in e("WEB_CHAT_HOSTS", "").split(",") if h.strip()),
+            web_chat_daily=max(0, _num(e("WEB_CHAT_DAILY", ""), cls.web_chat_daily, int)),
             groups=_bool(e("GROUPS", ""), True),
             group_open=_bool(e("GROUP_OPEN", ""), False),
             group_triggers=tuple(w.strip() for w in e("GROUP_TRIGGERS", "dz,دي زد").split(",") if w.strip()) or ("dz",),
@@ -286,6 +320,15 @@ class Config:
                 problems.append("WEB_PANEL_PORT must be between 1 and 65535")
             if self.telegram_token and len(self.web_panel_token) < 12:
                 problems.append("WEB_PANEL_TOKEN must be at least 12 characters when WEB_PANEL_PORT is set")
+        if self.web_chat_port:
+            if not 1 <= self.web_chat_port <= 65535:
+                problems.append("WEB_CHAT_PORT must be between 1 and 65535")
+            if self.web_chat_port == self.web_panel_port:
+                problems.append("WEB_CHAT_PORT must differ from WEB_PANEL_PORT (the chat is a separate site)")
+        if self.web_chat_url:
+            u = urlsplit(self.web_chat_url)
+            if u.scheme not in ("https", "http") or not u.hostname or u.username or u.password:
+                problems.append("WEB_CHAT_URL must look like https://your-domain (no user:password)")
         if self.web_panel_url:
             u = urlsplit(self.web_panel_url)
             if u.scheme not in ("https", "http") or not u.hostname or u.username or u.password:

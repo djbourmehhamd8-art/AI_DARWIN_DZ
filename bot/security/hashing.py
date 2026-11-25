@@ -5,7 +5,6 @@ import base64
 import binascii
 import hashlib
 import re
-from urllib.parse import unquote
 
 ALGOS = ("md5", "sha1", "sha256", "sha512", "sha3_256", "blake2b")
 
@@ -65,12 +64,3 @@ def b64_encode(s: str) -> str:
     return base64.b64encode(s.encode("utf-8")).decode()
 
 
-def hex_decode(s: str) -> str | None:
-    try:
-        return bytes.fromhex(re.sub(r"[\s:]|0x", "", s)).decode("utf-8", "replace")
-    except ValueError:
-        return None
-
-
-def url_decode(s: str) -> str:
-    return unquote(s)
